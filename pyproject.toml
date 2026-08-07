@@ -1,0 +1,27 @@
+[project]
+name = "claude-hooks"
+version = "0.1.0"
+description = "Personal Claude Code hooks"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bashlex>=0.18",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.2",
+    "ty>=0.0.69",
+]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "PIE", "PL", "RUF", "SIM", "UP"]
+ignore = [
+    "E501",    # Existing policy messages are formatted for terminal output.
+    "PLR0911", # Policy checks use early returns to keep rules readable.
+    "PLR0912", # Transfer policies necessarily encode several command branches.
+    "PLR2004", # Argument positions and minimum lengths are meaningful literals.
+]

@@ -1,0 +1,12 @@
+#!/bin/bash
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOOKS_DIR="$HOME/.claude/hooks"
+TARGET="$HOOKS_DIR/bash-policy.py"
+SOURCE="$REPO_DIR/bash-policy.py"
+
+mkdir -p "$HOOKS_DIR"
+ln -sfn "$SOURCE" "$TARGET"
+echo "Symlinked $TARGET -> $SOURCE"
