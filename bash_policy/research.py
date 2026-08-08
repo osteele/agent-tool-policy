@@ -1,6 +1,5 @@
 """Research rules for the Bash policy hook."""
 
-import hashlib
 import json
 import os
 import re
@@ -25,6 +24,19 @@ PREFLIGHT_MEMO = Path(
         Path.home() / ".claude" / "state" / "weft-preflight-affirmed.json",
     )
 )
+
+
+def _review_cli() -> Path | None:
+    """Find the fast local protocol CLI installed by cross-agent-review."""
+    configured = os.environ.get("CROSS_AGENT_REVIEW_CLI")
+    candidates = [
+        Path(configured) if configured else None,
+        Path.home() / "bin" / "agent-review",
+        Path.home() / "code" / "research" / "cross-agent-review" / "agent-review",
+    ]
+    return next(
+        (path for path in candidates if path is not None and path.is_file()), None
+    )
 
 
 def _lint(scripts: list[Path], profile: str) -> str:
@@ -54,29 +66,67 @@ def _preflight_scripts(command: str, cwd: str) -> list[Path]:
     return out
 
 
-def _preflight_key(path: Path) -> str:
+def _attestation_unseen(scripts: list[Path]) -> list[Path] | None:
+    """Ask the protocol owner which script versions have not been affirmed.
+
+    None means the boundary was unavailable. The caller fails open, matching the
+    hook's established behavior for unavailable guards.
+    """
+    cli = _review_cli()
+    if cli is None:
+        return None
     try:
-        return f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()[:16]}"
-    except OSError:
-        return ""
+        result = subprocess.run(
+            [
+                str(cli),
+                "attestation",
+                "check",
+                "--memo",
+                str(PREFLIGHT_MEMO),
+                *[str(script) for script in scripts],
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return None
+        payload = json.loads(result.stdout)
+        return [Path(value) for value in payload["unseen"]]
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+    ):
+        return None
 
 
-def _preflight_memo() -> dict:
+def _attestation_affirm(scripts: list[Path]) -> bool:
+    """Record affirmations through the protocol owner."""
+    cli = _review_cli()
+    if cli is None:
+        return False
     try:
-        return json.loads(PREFLIGHT_MEMO.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _preflight_remember(keys: list[str]) -> None:
-    memo = _preflight_memo()
-    for k in keys:
-        memo[k] = True
-    try:
-        PREFLIGHT_MEMO.parent.mkdir(parents=True, exist_ok=True)
-        PREFLIGHT_MEMO.write_text(json.dumps(memo, indent=0, sort_keys=True))
-    except OSError:
-        pass
+        result = subprocess.run(
+            [
+                str(cli),
+                "attestation",
+                "affirm",
+                "--memo",
+                str(PREFLIGHT_MEMO),
+                *[str(script) for script in scripts],
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def check_weft_preflight(command: str, cwd: str | None) -> tuple[str, str | None]:
@@ -106,17 +156,12 @@ def check_weft_preflight(command: str, cwd: str | None) -> tuple[str, str | None
         scripts = _preflight_scripts(command, cwd)
         if not scripts:
             return "", None
-        keys = [k for k in (_preflight_key(s) for s in scripts) if k]
-        if not keys:
-            return "", None
-
         if re.search(rf"#.*{PREFLIGHT_MARKER}", command):
-            _preflight_remember(keys)
+            _attestation_affirm(scripts)
             return "", None
 
-        memo = _preflight_memo()
-        unseen = [s for s, k in zip(scripts, keys, strict=False) if k not in memo]
-        if not unseen:
+        unseen = _attestation_unseen(scripts)
+        if unseen is None or not unseen:
             return "", None
 
         lint_errors = _lint(unseen, "remote")
@@ -190,17 +235,12 @@ def check_research_script_audit(
         ]
         if not scripts:
             return "", None
-        keys = [k for k in (_preflight_key(s) for s in scripts) if k]
-        if not keys:
-            return "", None
-
         if any(re.search(rf"#.*{m}", command) for m in LOCAL_MARKERS):
-            _preflight_remember(keys)
+            _attestation_affirm(scripts)
             return "", None
 
-        memo = _preflight_memo()
-        unseen = [s for s, k in zip(scripts, keys, strict=False) if k not in memo]
-        if not unseen:
+        unseen = _attestation_unseen(scripts)
+        if unseen is None or not unseen:
             return "", None
 
         lint_errors = _lint(unseen, "research")
