@@ -33,7 +33,7 @@ def _review_cli() -> Path | None:
     candidates = [
         Path(configured) if configured else None,
         Path.home() / "bin" / "agent-review",
-        Path.home() / "code" / "research" / "cross-agent-review" / "agent-review",
+        Path.home() / "code" / "agent-tools" / "cross-agent-review" / "agent-review",
     ]
     return next(
         (path for path in candidates if path is not None and path.is_file()), None
