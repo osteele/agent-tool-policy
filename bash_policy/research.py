@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PREFLIGHT_MARKER = "preflight-checked"
@@ -39,10 +40,32 @@ def _review_cli() -> Path | None:
     )
 
 
-def _lint(scripts: list[Path], profile: str) -> str:
-    """Deterministic checks. Returns the error lines, or '' if none/unavailable."""
+@dataclass(frozen=True)
+class CheckResult:
+    """Structured deterministic-check provenance for review packets."""
+
+    name: str
+    status: str
+    output: str = ""
+    tool: str = ""
+    tool_version: str = ""
+    exit_status: int | None = None
+
+    @property
+    def error_lines(self) -> str:
+        return "\n".join(
+            line for line in self.output.splitlines() if ": error: " in line
+        )
+
+
+def _lint(scripts: list[Path], profile: str) -> CheckResult:
+    """Run deterministic checks without conflating failure and unavailability."""
     if not LINTER.is_file():
-        return ""
+        return CheckResult(
+            name="research-script-lint",
+            status="unavailable",
+            tool=str(LINTER),
+        )
     try:
         r = subprocess.run(
             [str(LINTER), "--profile", profile, *[str(s) for s in scripts]],
@@ -51,9 +74,68 @@ def _lint(scripts: list[Path], profile: str) -> str:
             text=True,
             timeout=20,
         )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            name="research-script-lint",
+            status="timeout",
+            tool=str(LINTER),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return CheckResult(
+            name="research-script-lint",
+            status="exception",
+            output=str(error),
+            tool=str(LINTER),
+        )
+    output = "\n".join(value for value in (r.stdout, r.stderr) if value).strip()
+    return CheckResult(
+        name="research-script-lint",
+        status="pass" if r.returncode == 0 else "fail",
+        output=output,
+        tool=str(LINTER),
+        exit_status=r.returncode,
+    )
+
+
+def _record_opportunities(
+    scripts: list[Path], cwd: str, review_kind: str, check: CheckResult
+) -> bool:
+    """Best-effort local recording; this boundary must never affect a decision."""
+    cli = _review_cli()
+    if cli is None:
+        return False
+    try:
+        recorder_env = dict(os.environ)
+        if "CROSS_AGENT_REVIEW_STATE" not in recorder_env:
+            isolated_memo = recorder_env.get("WEFT_PREFLIGHT_MEMO")
+            if isolated_memo:
+                recorder_env["CROSS_AGENT_REVIEW_STATE"] = str(
+                    Path(isolated_memo).parent / "review-state"
+                )
+        result = subprocess.run(
+            [
+                str(cli),
+                "opportunity",
+                "record",
+                "--project",
+                cwd,
+                "--kind",
+                review_kind,
+                "--source-label",
+                "claude-codex-hook",
+                "--checks-json",
+                json.dumps([asdict(check)], sort_keys=True),
+                *[str(script) for script in scripts],
+            ],
+            capture_output=True,
+            check=False,
+            env=recorder_env,
+            text=True,
+            timeout=2,
+        )
+        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return "\n".join(ln for ln in r.stdout.splitlines() if ": error: " in ln)
+        return False
 
 
 def _preflight_scripts(command: str, cwd: str) -> list[Path]:
@@ -164,7 +246,9 @@ def check_weft_preflight(command: str, cwd: str | None) -> tuple[str, str | None
         if unseen is None or not unseen:
             return "", None
 
-        lint_errors = _lint(unseen, "remote")
+        lint_result = _lint(unseen, "remote")
+        _record_opportunities(unseen, cwd, "remote-preflight", lint_result)
+        lint_errors = lint_result.error_lines
         names = ", ".join(s.name for s in unseen)
         head = (
             f"Deterministic checks FAILED for {names}:\n\n{lint_errors}\n\n"
@@ -243,7 +327,9 @@ def check_research_script_audit(
         if unseen is None or not unseen:
             return "", None
 
-        lint_errors = _lint(unseen, "research")
+        lint_result = _lint(unseen, "research")
+        _record_opportunities(unseen, cwd, "local-research", lint_result)
+        lint_errors = lint_result.error_lines
         names = ", ".join(s.name for s in unseen)
         head = (
             f"Deterministic checks FAILED for {names}:\n\n{lint_errors}\n\n"
