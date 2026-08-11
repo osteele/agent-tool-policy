@@ -118,7 +118,7 @@ def check_remote_jobs_absolute_directory(command: str) -> tuple[str, str | None]
     else:
         return "", None
 
-    # Find -C argument value (bashlex strips quotes, so '~/...' becomes ~/...)
+    # Find -C argument value (the parser strips quotes, so '~/...' becomes ~/...)
     i = 0
     while i < len(args):
         arg = args[i]

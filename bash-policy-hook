@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+SCRIPT_PATH=$0
+if LINK_TARGET=$(readlink "$SCRIPT_PATH" 2>/dev/null); then
+    case "$LINK_TARGET" in
+        /*) SCRIPT_PATH=$LINK_TARGET ;;
+        *) SCRIPT_PATH=$(dirname -- "$SCRIPT_PATH")/$LINK_TARGET ;;
+    esac
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+PYTHON_BIN=$SCRIPT_DIR/.venv/bin/python
+UV_BIN=${UV_BIN:-${HOME:?}/.local/bin/uv}
+
+if [ -x "$PYTHON_BIN" ]; then
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/bash-policy.py"
+fi
+
+if [ ! -x "$UV_BIN" ]; then
+    UV_BIN=$(command -v uv)
+fi
+
+exec "$UV_BIN" run --script "$SCRIPT_DIR/bash-policy.py"

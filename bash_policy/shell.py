@@ -1,55 +1,39 @@
 """Shell rules for the Bash policy hook."""
 
+import json
 import os
-from typing import Protocol, cast
+import subprocess
+from functools import cache
+from pathlib import Path
+from typing import cast
 
-import bashlex
-import bashlex.errors
-
-
-class _BashNode(Protocol):
-    kind: str
-    word: str
-    parts: list["_BashNode"]
-    list: list["_BashNode"]
+PARSER = Path(__file__).resolve().parent.parent / ".bin" / "bash-policy-parser"
+PARSER_TIMEOUT_SECONDS = 1
 
 
+@cache
 def extract_commands(command: str) -> list[list[str]]:
     """
-    Parse a shell command string using bashlex and return a list of simple
-    commands, each as a list of word strings. Shell syntax (redirects, pipes,
-    &, &&, ||, ;) is handled by the parser and stripped out.
+    Parse a shell command with the mvdan/sh helper and return its simple commands.
 
-    Returns an empty list if parsing fails.
+    Each command is represented as word strings. Shell syntax such as redirects,
+    pipelines, and list operators is omitted. Returns an empty list when the helper
+    is missing, times out, or cannot parse the input.
     """
     try:
-        parts = bashlex.parse(command)
-    except bashlex.errors.ParsingError:
+        result = subprocess.run(
+            [os.environ.get("BASH_POLICY_PARSER", str(PARSER))],
+            input=command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=PARSER_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            return []
+        return cast(list[list[str]], json.loads(result.stdout))
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
         return []
-
-    commands: list[list[str]] = []
-
-    def visit(node: _BashNode) -> None:
-        if node.kind == "command":
-            words = [p.word for p in node.parts if p.kind == "word"]
-            if words:
-                commands.append(words)
-        elif node.kind == "list":
-            for child in node.parts:
-                if hasattr(child, "kind"):
-                    visit(child)
-        elif node.kind == "compound":
-            for child in node.list:
-                visit(child)
-        elif hasattr(node, "parts"):
-            for child in node.parts:
-                if hasattr(child, "kind"):
-                    visit(child)
-
-    for part in parts:
-        visit(cast(_BashNode, part))
-
-    return commands
 
 
 def find_command(command: str, name: str) -> list[str] | None:

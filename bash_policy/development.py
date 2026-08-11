@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -114,20 +115,92 @@ def is_jj_repo(cwd: str) -> bool:
     return False
 
 
+def _resolve_executable(executable: str, cwd: str) -> Path | None:
+    """Resolve a command token the way the shell will for a simple invocation."""
+    if "/" in executable:
+        path = Path(os.path.expanduser(executable))
+        if not path.is_absolute():
+            path = Path(cwd) / path
+        return path.resolve()
+
+    resolved = shutil.which(executable)
+    return Path(resolved).resolve() if resolved else None
+
+
+def _git_shadow_is_in_scope(executable: str, cwd: str) -> bool:
+    """Check whether this Git invocation resolves to llm-shadow-commands/git."""
+    shadow_dir = os.environ.get(
+        "LLM_SHADOW_COMMANDS_DIR", "~/code/agent-tools/llm-shadow-commands"
+    )
+    shadow_git = Path(os.path.expanduser(shadow_dir), "git")
+    invoked_git = _resolve_executable(executable, cwd)
+    if (
+        invoked_git is None
+        or not shadow_git.is_file()
+        or not os.access(shadow_git, os.X_OK)
+    ):
+        return False
+    return invoked_git == shadow_git.resolve()
+
+
+def _git_subcommand(words: list[str]) -> str | None:
+    """Return Git's subcommand after its global options."""
+    options_with_separate_values = {
+        "-C",
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word in options_with_separate_values:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        return word
+    return None
+
+
+def _git_without_shadow_warning(subcmd: str) -> tuple[str, str]:
+    jj_command = "jj bookmark list" if subcmd == "branch" else f"jj {subcmd}"
+    return "allow", (
+        f"This is a jj repository, but `git {subcmd}` is not using the Git shadow "
+        f"wrapper. Use `{jj_command}` instead; direct Git may observe stale or "
+        "incomplete jj state."
+    )
+
+
+def _git_denied_reason(subcmd: str) -> str:
+    return (
+        f"This is a jj repository. Use `jj` instead of `git {subcmd}`. "
+        f"To intentionally use git, add a comment: "
+        f"`git {subcmd} # intentionally ignoring jj`"
+    )
+
+
 def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None]:
     """
     Check if a git command is being used in a jj repository.
-    Deny git status/commit/add/stash/apply unless the command includes a comment
-    indicating intentional use (e.g., `git status # intentionally ignoring jj`).
+    Deny git commit/add/stash/apply unless the command includes an intentional
+    override comment. Warn on git log/diff/show/status/branch when that invocation does
+    not resolve to the llm-shadow-commands Git wrapper.
 
-    git log/diff/show are allowed because the llm-shadow-commands git wrapper
-    intercepts them, exports jj state, and delegates to real git transparently.
+    The executable-path check catches explicit bypasses such as /usr/bin/git even
+    when the shadow-command directory is otherwise on PATH.
 
-    Uses both bashlex parsing and a regex fallback, so the guard still works
-    when bashlex can't parse the command (e.g., heredocs).
+    Uses both structured parsing and a regex fallback, so the guard still works
+    when the parser cannot parse the command.
 
     Returns:
         ("deny", reason) if git command used in jj repo without override
+        ("allow", warning) if a read command bypasses the shadow wrapper
         ("", None) otherwise
     """
     if not cwd:
@@ -140,30 +213,38 @@ def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None
     if re.search(r"#.*intentionally ignoring jj", command):
         return "", None
 
-    # log/diff/show/status are handled transparently by the git shadow wrapper
-    jj_subcommands = {"commit", "add", "stash", "apply"}
+    denied_subcommands = {"commit", "add", "stash", "apply"}
+    shadowed_subcommands = {"log", "diff", "show", "status", "branch"}
 
     # Try structured parsing first
     parsed_cmds = extract_commands(command)
+    git_commands: list[tuple[str, str]] = []
     for cmd_words in parsed_cmds:
         if os.path.basename(cmd_words[0]) == "git" and len(cmd_words) >= 2:
-            subcmd = cmd_words[1]
-            if subcmd in jj_subcommands:
-                return "deny", (
-                    f"This is a jj repository. Use `jj` instead of `git {subcmd}`. "
-                    f"To intentionally use git, add a comment: "
-                    f"`git {subcmd} # intentionally ignoring jj`"
-                )
+            subcmd = _git_subcommand(cmd_words)
+            if subcmd is not None:
+                git_commands.append((cmd_words[0], subcmd))
 
-    # Regex fallback when bashlex can't parse (e.g., heredocs)
+    for _, subcmd in git_commands:
+        if subcmd in denied_subcommands:
+            return "deny", _git_denied_reason(subcmd)
+
+    for executable, subcmd in git_commands:
+        if subcmd in shadowed_subcommands and not _git_shadow_is_in_scope(
+            executable, cwd
+        ):
+            return _git_without_shadow_warning(subcmd)
+
+    # Regex fallback when structured parsing fails.
     if not parsed_cmds:
-        for match in re.finditer(r"\bgit\s+(commit|add|stash|apply)\b", command):
-            subcmd = match.group(1)
-            return "deny", (
-                f"This is a jj repository. Use `jj` instead of `git {subcmd}`. "
-                f"To intentionally use git, add a comment: "
-                f"`git {subcmd} # intentionally ignoring jj`"
-            )
+        git_pattern = r"\bgit\s+(commit|add|stash|apply|branch|log|diff|show|status)\b"
+        subcommands = [match.group(1) for match in re.finditer(git_pattern, command)]
+        for subcmd in subcommands:
+            if subcmd in denied_subcommands:
+                return "deny", _git_denied_reason(subcmd)
+        for subcmd in subcommands:
+            if not _git_shadow_is_in_scope("git", cwd):
+                return _git_without_shadow_warning(subcmd)
 
     return "", None
 

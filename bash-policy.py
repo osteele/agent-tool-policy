@@ -1,7 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# dependencies = ["bashlex"]
-# ///
+#!/usr/bin/env python3
 """Claude Code PreToolUse policy for Bash commands."""
 
 import importlib

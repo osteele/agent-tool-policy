@@ -25,17 +25,59 @@ from .research import check_research_script_audit, check_weft_preflight
 from .transfers import check_mutagen_flush_with_rsync_fallback, evaluate_transfer
 
 
-def emit_decision(decision: str, reason: str | None = None) -> None:
-    """Print a hook decision as JSON and exit."""
-    output: dict = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-        }
+def adapt_decision(
+    decision: str,
+    reason: str | None = None,
+    *,
+    codex: bool,
+    updated_input: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Convert a policy decision to the active hook protocol."""
+    if codex:
+        hook_output: dict = {"hookEventName": "PreToolUse"}
+        if decision == "allow":
+            if updated_input is not None:
+                hook_output["permissionDecision"] = "allow"
+                hook_output["updatedInput"] = updated_input
+            elif not reason:
+                return None
+            if reason:
+                hook_output["additionalContext"] = reason
+        elif decision in {"deny", "ask"}:
+            hook_output["permissionDecision"] = "deny"
+            if reason:
+                hook_output["permissionDecisionReason"] = reason
+        else:
+            return None
+        return {"hookSpecificOutput": hook_output}
+
+    hook_output = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
     }
     if reason:
-        output["hookSpecificOutput"]["permissionDecisionReason"] = reason
-    print(json.dumps(output))
+        hook_output["permissionDecisionReason"] = reason
+    if updated_input is not None:
+        return {
+            "hookSpecificOutput": {
+                **hook_output,
+                "updatedInput": updated_input,
+            }
+        }
+    return {"hookSpecificOutput": hook_output}
+
+
+def emit_decision(
+    decision: str,
+    reason: str | None = None,
+    *,
+    codex: bool,
+    updated_input: dict[str, object] | None = None,
+) -> None:
+    """Print an adapted hook decision and exit."""
+    output = adapt_decision(decision, reason, codex=codex, updated_input=updated_input)
+    if output is not None:
+        print(json.dumps(output))
     sys.exit(0)
 
 
@@ -55,13 +97,14 @@ def main():
     tool_input = input_data.get("tool_input", {})
     command = tool_input.get("command", "")
     cwd = input_data.get("cwd")
+    is_codex = "model" in input_data or "turn_id" in input_data
 
     if tool_name != "Bash":
         sys.exit(0)
 
     # Deny checks run first so they aren't short-circuited by allow checks
-    # (e.g., check_git_in_jj_repo must deny `git status` before
-    # check_all_commands_safe can auto-approve it).
+    # check_git_in_jj_repo must deny Git mutations or warn about unshadowed Git
+    # reads before check_all_commands_safe can auto-approve them.
     checks: list[Callable[[], tuple[str, str | None]]] = [
         lambda: check_weft_preflight(command, cwd),
         lambda: check_research_script_audit(command, cwd),
@@ -84,6 +127,6 @@ def main():
     for check in checks:
         decision, reason = check()
         if decision:
-            emit_decision(decision, reason)
+            emit_decision(decision, reason, codex=is_codex)
 
     sys.exit(0)

@@ -1,12 +1,8 @@
 """End-to-end regression tests for bash-policy.py.
 
-Self-contained (stdlib unittest only), matching test_anthropic_proxy.py.
-
-The hook is driven as a subprocess through its own shebang rather than imported,
-because it declares its dependency (``bashlex``) in PEP 723 metadata resolved by
-``uv run --script``. Importing it from a plain interpreter raises ImportError, and
-a test harness that swallows that failure reports a silent pass on every case —
-which is exactly what happened the first time these checks were written by hand.
+Self-contained (stdlib unittest only), matching test_anthropic_proxy.py. The hook
+is driven as a subprocess through its own shebang so these tests exercise its real
+input and output protocol as well as the compiled parser helper.
 
 Run: python3 test_bash_policy.py
 """
@@ -22,21 +18,23 @@ HERE = Path(os.path.dirname(os.path.abspath(__file__)))
 HOOK = HERE / "bash-policy.py"
 
 
-def decide(cwd, command, memo=None):
-    """Return (permissionDecision, reason) as the harness would see them.
-
-    ``memo`` isolates the preflight affirmation store; without it the global memo
-    leaks affirmations between test cases and the deny cases spuriously pass.
-    """
-    payload = json.dumps(
-        {"tool_name": "Bash", "cwd": str(cwd), "tool_input": {"command": command}}
-    )
+def invoke_hook(cwd, command, memo=None, env_overrides=None, payload_overrides=None):
+    """Return the hook's decoded JSON output, or an empty dictionary."""
+    payload = {
+        "tool_name": "Bash",
+        "cwd": str(cwd),
+        "tool_input": {"command": command},
+    }
+    if payload_overrides:
+        payload.update(payload_overrides)
     env = dict(os.environ)
     if memo is not None:
         env["WEFT_PREFLIGHT_MEMO"] = str(memo)
+    if env_overrides:
+        env.update(env_overrides)
     proc = subprocess.run(
         [str(HOOK)],
-        input=payload,
+        input=json.dumps(payload),
         capture_output=True,
         check=False,
         text=True,
@@ -46,8 +44,24 @@ def decide(cwd, command, memo=None):
         raise RuntimeError(f"hook failed rc={proc.returncode}: {proc.stderr[:400]}")
     out = proc.stdout.strip()
     if not out:
-        return "", ""
-    spec = json.loads(out).get("hookSpecificOutput", {})
+        return {}
+    return json.loads(out)
+
+
+def decide(cwd, command, memo=None, env_overrides=None, payload_overrides=None):
+    """Return (permissionDecision, reason) as the harness would see them.
+
+    ``memo`` isolates the preflight affirmation store; without it the global memo
+    leaks affirmations between test cases and the deny cases spuriously pass.
+    """
+    output = invoke_hook(
+        cwd,
+        command,
+        memo=memo,
+        env_overrides=env_overrides,
+        payload_overrides=payload_overrides,
+    )
+    spec = output.get("hookSpecificOutput", {})
     return spec.get("permissionDecision", ""), spec.get("permissionDecisionReason", "")
 
 
@@ -102,7 +116,7 @@ class WeftPreflightTest(unittest.TestCase):
 
 
 class GitInJjRepoTest(unittest.TestCase):
-    """Rule 7: git mutations inside a jj repo, and the override comment."""
+    """Rule 7: Git mutations and unshadowed reads inside a jj repo."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -117,6 +131,40 @@ class GitInJjRepoTest(unittest.TestCase):
         decision, _ = decide(repo, "git commit -m x")
         self.assertEqual(decision, "deny")
 
+    def test_git_text_in_quoted_python_heredoc_is_not_a_command(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        command = "python3 - <<'PY'\nprint('git commit')\nPY"
+        decision, _ = decide(repo, command)
+        self.assertNotEqual(decision, "deny")
+
+    def test_git_expansion_in_unquoted_heredoc_is_a_command(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        command = 'python3 - <<PY\nprint("$(git commit)")\nPY'
+        decision, _ = decide(repo, command)
+        self.assertEqual(decision, "deny")
+
+    def test_git_branch_uses_shadow_wrapper_in_jj_repo(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        shadow_dir = self.tmp / "shadow"
+        shadow_dir.mkdir()
+        shadow_git = shadow_dir / "git"
+        shadow_git.write_text("#!/bin/bash\nexit 0\n")
+        shadow_git.chmod(0o755)
+        decision, reason = decide(
+            repo,
+            "git status --short --branch && git remote -v && git branch --show-current",
+            env_overrides={
+                "LLM_SHADOW_COMMANDS_DIR": str(shadow_dir),
+                "PATH": f"{shadow_dir}:{os.environ['PATH']}",
+            },
+            payload_overrides={"model": "test-model", "turn_id": "turn-test"},
+        )
+        self.assertEqual(decision, "")
+        self.assertEqual(reason, "")
+
     def test_override_comment_allows_it(self):
         repo = self.tmp / "repo"
         (repo / ".jj").mkdir(parents=True)
@@ -128,6 +176,177 @@ class GitInJjRepoTest(unittest.TestCase):
         (repo / ".git").mkdir(parents=True)
         decision, _ = decide(repo, "git commit -m x")
         self.assertNotEqual(decision, "deny")
+
+    def test_git_log_warns_when_shadow_wrapper_is_absent(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        missing_shadow = self.tmp / "missing-shadow"
+
+        decision, reason = decide(
+            repo,
+            "git log -1",
+            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(missing_shadow)},
+        )
+
+        self.assertEqual(decision, "allow")
+        self.assertIn("not using the Git shadow wrapper", reason)
+        self.assertIn("jj log", reason)
+
+    def test_git_reads_do_not_warn_when_shadow_wrapper_is_in_scope(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        shadow_dir = self.tmp / "shadow"
+        shadow_dir.mkdir()
+        shadow_git = shadow_dir / "git"
+        shadow_git.write_text("#!/bin/bash\nexit 0\n")
+        shadow_git.chmod(0o755)
+        path = f"{shadow_dir}:{os.environ['PATH']}"
+
+        for subcmd in ("log", "diff", "show", "status"):
+            with self.subTest(subcmd=subcmd):
+                decision, reason = decide(
+                    repo,
+                    f"git {subcmd}",
+                    env_overrides={
+                        "LLM_SHADOW_COMMANDS_DIR": str(shadow_dir),
+                        "PATH": path,
+                    },
+                )
+                self.assertEqual(decision, "allow")
+                self.assertEqual(reason, "")
+
+    def test_explicit_real_git_warns_even_when_shadow_is_on_path(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        shadow_dir = self.tmp / "shadow"
+        shadow_dir.mkdir()
+        shadow_git = shadow_dir / "git"
+        shadow_git.write_text("#!/bin/bash\nexit 0\n")
+        shadow_git.chmod(0o755)
+
+        decision, reason = decide(
+            repo,
+            "/usr/bin/git status",
+            env_overrides={
+                "LLM_SHADOW_COMMANDS_DIR": str(shadow_dir),
+                "PATH": f"{shadow_dir}:{os.environ['PATH']}",
+            },
+        )
+
+        self.assertEqual(decision, "allow")
+        self.assertIn("not using the Git shadow wrapper", reason)
+
+    def test_override_comment_suppresses_read_warning(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+
+        decision, reason = decide(
+            repo,
+            "git log  # intentionally ignoring jj",
+            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+        )
+
+        self.assertEqual(decision, "allow")
+        self.assertEqual(reason, "")
+
+    def test_git_global_options_do_not_hide_read_subcommand(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        missing_shadow = self.tmp / "missing-shadow"
+
+        for command, expected_jj in (
+            ("git --no-pager show @-", "jj show"),
+            ("git -C elsewhere log -1", "jj log"),
+        ):
+            with self.subTest(command=command):
+                decision, reason = decide(
+                    repo,
+                    command,
+                    env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(missing_shadow)},
+                )
+                self.assertEqual(decision, "allow")
+                self.assertIn(expected_jj, reason)
+
+
+class CodexOutputAdapterTest(unittest.TestCase):
+    """Codex PreToolUse accepts deny, context, or allow with updatedInput."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.codex_payload = {"model": "test-model", "turn_id": "turn-test"}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_bare_allow_emits_nothing(self):
+        output = invoke_hook(
+            self.tmp,
+            "jj status",
+            payload_overrides=self.codex_payload,
+        )
+        self.assertEqual(output, {})
+
+    def test_allow_with_advice_becomes_additional_context(self):
+        (self.tmp / ".jj").mkdir()
+        output = invoke_hook(
+            self.tmp,
+            "git log -1",
+            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+            payload_overrides=self.codex_payload,
+        )
+        hook_output = output["hookSpecificOutput"]
+        self.assertNotIn("permissionDecision", hook_output)
+        self.assertIn("Use `jj log` instead", hook_output["additionalContext"])
+
+    def test_deny_is_preserved(self):
+        (self.tmp / ".jj").mkdir()
+        output = invoke_hook(
+            self.tmp,
+            "git commit -m x",
+            payload_overrides=self.codex_payload,
+        )
+        hook_output = output["hookSpecificOutput"]
+        self.assertEqual(hook_output["permissionDecision"], "deny")
+        self.assertIn("Use `jj`", hook_output["permissionDecisionReason"])
+
+    def test_ask_is_conservatively_denied(self):
+        output = invoke_hook(
+            self.tmp,
+            "pip install requests",
+            payload_overrides=self.codex_payload,
+        )
+        hook_output = output["hookSpecificOutput"]
+        self.assertEqual(hook_output["permissionDecision"], "deny")
+        self.assertIn("Are you sure", hook_output["permissionDecisionReason"])
+
+
+class BashSyntaxTest(unittest.TestCase):
+    """Bash constructs parse without crashing the global Bash gate."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_hook_handles_supported_bash_syntax(self):
+        commands = (
+            'case ":$PATH:" in *":$HOME/.local/bin:"*) echo present;; esac',
+            "echo $((1 + 2))",
+            "time sleep 0.01",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                output = invoke_hook(self.tmp, command)
+                self.assertEqual(
+                    output["hookSpecificOutput"]["permissionDecision"], "allow"
+                )
+
+    def test_hook_fails_open_for_invalid_syntax(self):
+        self.assertEqual(invoke_hook(self.tmp, "echo 'unterminated"), {})
 
 
 if __name__ == "__main__":

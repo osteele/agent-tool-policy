@@ -4,9 +4,7 @@ version = "0.1.0"
 description = "Personal Claude Code hooks"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "bashlex>=0.18",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [

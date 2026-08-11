@@ -2,9 +2,11 @@
 
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from bash_policy.development import check_all_commands_safe, check_pip_command
+from bash_policy.hook import adapt_decision
 from bash_policy.remote_jobs import (
     check_remote_jobs_absolute_directory,
     check_remote_jobs_unquoted_tilde,
@@ -23,6 +25,29 @@ class ShellParsingTest(unittest.TestCase):
 
     def test_finds_nested_command(self) -> None:
         self.assertEqual(find_command("echo one; jj status", "jj"), ["jj", "status"])
+
+    def test_mvdan_parser_supports_bash_constructs(self) -> None:
+        commands = (
+            (
+                'case ":$PATH:" in *":$HOME/.local/bin:"*) echo present;; esac',
+                [["echo", "present"]],
+            ),
+            ("echo $((1 + 2))", [["echo", "$((1 + 2))"]]),
+            ("time sleep 0.01", [["sleep", "0.01"]]),
+        )
+
+        for command, expected in commands:
+            with self.subTest(command=command):
+                self.assertEqual(extract_commands(command), expected)
+
+    def test_invalid_syntax_fails_open(self) -> None:
+        self.assertEqual(extract_commands("echo 'unterminated"), [])
+
+    def test_missing_parser_fails_open(self) -> None:
+        with unittest.mock.patch.dict(
+            "os.environ", {"BASH_POLICY_PARSER": "/missing/bash-policy-parser"}
+        ):
+            self.assertEqual(extract_commands("echo unique-missing-parser-test"), [])
 
 
 class RemoteJobsPolicyTest(unittest.TestCase):
@@ -65,6 +90,37 @@ class DevelopmentPolicyTest(unittest.TestCase):
             Path(tmp, "pyproject.toml").touch()
             decision, _ = check_pip_command("pip install requests", tmp)
         self.assertEqual(decision, "deny")
+
+
+class HookProtocolAdapterTest(unittest.TestCase):
+    def test_codex_rewrite_uses_allow_with_updated_input(self) -> None:
+        output = adapt_decision(
+            "allow",
+            codex=True,
+            updated_input={"command": "jj status"},
+        )
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": {"command": "jj status"},
+                }
+            },
+        )
+
+    def test_claude_bare_allow_is_preserved(self) -> None:
+        output = adapt_decision("allow", codex=False)
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            },
+        )
 
 
 class TransferParsingTest(unittest.TestCase):

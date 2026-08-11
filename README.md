@@ -15,15 +15,19 @@ Anthropic proxy.
 The executable is intentionally small. Policy implementations live in the
 `bash_policy` package, grouped by responsibility.
 
+Shell commands are parsed by a small compiled helper built on
+[`mvdan/sh`](https://github.com/mvdan/sh). The helper runs once per hook invocation
+and returns only the command words needed by the Python policy rules.
+
 Research audit attestations are owned by
-`~/code/research/cross-agent-review`. This hook detects relevant commands, runs
+`~/code/agent-tools/cross-agent-review`. This hook detects relevant commands, runs
 deterministic lint, and presents host-specific guidance; it delegates content
 keys and memo state to the fast local `agent-review` command. Review Workbench
 remains the separate viewer and future control surface for review rounds.
 
 In jj repositories, Git mutations are denied by default. Read-oriented Git
 commands produce a warning when they do not resolve to
-`~/code/llm-shadow-commands/git`, because an unshadowed Git view can lag jj's
+`~/code/agent-tools/llm-shadow-commands/git`, because an unshadowed Git view can lag jj's
 operation and revision state.
 
 The hook adapts its output protocol to the caller. Claude receives native
@@ -31,7 +35,7 @@ The hook adapts its output protocol to the caller. Claude receives native
 advisory allows become `additionalContext`, asks fail closed as denials, and
 rewrites use `allow` together with `updatedInput`.
 
-Install the hook symlink:
+Install the hook symlink and build the parser helper (requires Go 1.25 or later):
 
 ```bash
 ./setup
@@ -42,10 +46,14 @@ Configure Claude Code to run it for Bash `PreToolUse` events:
 ```json
 {
   "type": "command",
-  "command": "~/.claude/hooks/bash-policy.py",
+  "command": "~/.claude/hooks/bash-policy-hook",
   "timeout": 5
 }
 ```
+
+The launcher uses the project's virtual environment when available. Otherwise,
+it resolves `uv` from `~/.local/bin` before falling back to `PATH`, so the hook
+also works in agents that start hooks with a minimal environment.
 
 Run the tests with:
 
