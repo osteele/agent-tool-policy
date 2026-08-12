@@ -6,14 +6,14 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from bash_policy.adapters import CLAUDE_ADAPTER, CODEX_ADAPTER
 from bash_policy.development import (
     check_all_commands_safe,
     check_pip_command,
     check_ruff_commands,
 )
 from bash_policy.engine import evaluate_policies
-from bash_policy.hook import adapt_decision
-from bash_policy.models import Decision, FunctionPolicy, Request
+from bash_policy.models import Decision, FunctionPolicy, Request, Resolution
 from bash_policy.registry import POLICIES
 from bash_policy.remote_jobs import (
     check_remote_jobs_absolute_directory,
@@ -154,24 +154,7 @@ class DevelopmentPolicyTest(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
 
-class HookProtocolAdapterTest(unittest.TestCase):
-    def test_codex_rewrite_uses_allow_with_updated_input(self) -> None:
-        output = adapt_decision(
-            "allow",
-            codex=True,
-            updated_input={"command": "jj status"},
-        )
-        self.assertEqual(
-            output,
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "updatedInput": {"command": "jj status"},
-                }
-            },
-        )
-
+class PolicyEngineTest(unittest.TestCase):
     def test_deny_takes_priority_and_all_checks_run(self) -> None:
         calls: list[str] = []
 
@@ -238,14 +221,86 @@ class HookProtocolAdapterTest(unittest.TestCase):
         names = [policy.name for policy in POLICIES]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_claude_bare_allow_is_preserved(self) -> None:
-        output = adapt_decision("allow", codex=False)
+
+class HookProtocolAdapterTest(unittest.TestCase):
+    def test_codex_rewrite_uses_allow_with_updated_input(self) -> None:
+        output = CODEX_ADAPTER.render(
+            Resolution("allow"),
+            updated_input={"command": "jj status"},
+        )
         self.assertEqual(
             output,
             {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
+                    "updatedInput": {"command": "jj status"},
+                }
+            },
+        )
+
+    def test_claude_bare_allow_is_preserved(self) -> None:
+        output = CLAUDE_ADAPTER.render(Resolution("allow"))
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            },
+        )
+
+    def test_claude_preserves_ask(self) -> None:
+        output = CLAUDE_ADAPTER.render(Resolution("ask", "confirm"))
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": "confirm",
+                }
+            },
+        )
+
+    def test_codex_converts_ask_to_deny(self) -> None:
+        output = CODEX_ADAPTER.render(Resolution("ask", "confirm"))
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "confirm",
+                }
+            },
+        )
+
+    def test_codex_bare_allow_emits_nothing(self) -> None:
+        self.assertIsNone(CODEX_ADAPTER.render(Resolution("allow")))
+
+    def test_codex_advice_is_additional_context(self) -> None:
+        output = CODEX_ADAPTER.render(Resolution(None, advice=("warning",)))
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": "warning",
+                }
+            },
+        )
+
+    def test_claude_advice_is_advisory_allow(self) -> None:
+        output = CLAUDE_ADAPTER.render(Resolution(None, advice=("warning",)))
+        self.assertEqual(
+            output,
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "warning",
                 }
             },
         )

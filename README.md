@@ -35,7 +35,10 @@ Resolution uses fixed safety precedence: `deny` before `ask` before `allow`.
 Numeric policy priority only breaks ties within the same disposition; it cannot
 make an allow override a denial. Advice is deduplicated and aggregated separately
 from the actionable result, then translated to the Claude or Codex hook protocol
-at the outer boundary.
+at the outer boundary. Dedicated protocol adapters preserve Claude's native
+`ask` decision, while the Codex adapter converts asks to denials because Codex
+PreToolUse does not currently support asking. Codex advice is emitted as
+`additionalContext`; bare Codex allows emit no output.
 
 Research audit attestations are owned by
 `~/code/agent-tools/cross-agent-review`. This hook detects relevant commands, runs

@@ -352,6 +352,16 @@ class CodexOutputAdapterTest(unittest.TestCase):
         self.assertIn("Are you sure", hook_output["permissionDecisionReason"])
 
 
+class ClaudeOutputAdapterTest(unittest.TestCase):
+    """Claude PreToolUse preserves its native ask decision."""
+
+    def test_ask_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision, reason = decide(tmp, "pip install requests")
+        self.assertEqual(decision, "ask")
+        self.assertIn("Are you sure", reason)
+
+
 class BashSyntaxTest(unittest.TestCase):
     """Bash constructs parse without crashing the global Bash gate."""
 
