@@ -1,7 +1,30 @@
 # Claude Hooks
 
-Personal Claude Code hooks that are independent of `claude-wrapper` and its
-Anthropic proxy.
+Personal Claude Code and Codex hooks that enforce local development and research
+workflows. They are independent of `claude-wrapper` and its Anthropic proxy.
+
+## Positioning
+
+Claude Code Auto mode and Codex approval modes provide the general safety
+boundary for tool use. They classify risk, constrain filesystem and network
+access, and decide when an action needs review. These hooks leave that broad
+responsibility to the host agent.
+
+The policies here encode conventions that a general permission system cannot
+reliably infer. They use repository state, parsed command structure, local tools,
+and saved attestations to enforce rules such as:
+
+- use Jujutsu instead of mutating Git state in a Jujutsu repository
+- use a project's configured build command instead of bypassing it
+- validate `remote-jobs` and Weft invocations against local workflow rules
+- coordinate transfers with Mutagen and protected destination conventions
+- require first-run review of new or modified research scripts
+
+Most commands receive no decision and continue to the native permission system.
+A small set of exact, deterministic rules approves familiar read-oriented
+commands or supplies advice. The hook does not use ML to classify arbitrary
+commands, and its policies do not replace the sandbox or the agent's approval
+review.
 
 ## Bash policy
 
