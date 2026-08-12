@@ -3,28 +3,11 @@
 import json
 import select
 import sys
-from collections.abc import Callable
 
-from .development import (
-    check_all_commands_safe,
-    check_git_in_jj_repo,
-    check_jj_split,
-    check_jj_squash,
-    check_pdflatex_with_justfile,
-    check_pip_command,
-    check_ruff_commands,
-)
-from .remote_jobs import (
-    check_remote_jobs_absolute_directory,
-    check_remote_jobs_script_instrumentation,
-    check_remote_jobs_unquoted_tilde,
-    check_remote_jobs_wait_flag,
-    check_ssh_remote_jobs_access,
-)
-from .research import check_research_script_audit, check_weft_preflight
-from .transfers import check_mutagen_flush_with_rsync_fallback, evaluate_transfer
-
-DecisionCheck = Callable[[], tuple[str, str | None]]
+from .engine import evaluate_policies
+from .models import Resolution
+from .registry import POLICIES
+from .shell import build_request
 
 
 def adapt_decision(
@@ -83,25 +66,29 @@ def emit_decision(
     sys.exit(0)
 
 
-def resolve_checks(checks: list[DecisionCheck]) -> tuple[str, str | None]:
-    """Evaluate every check and select the highest-priority result."""
-    results = [check() for check in checks]
-
-    for priority in ("deny", "ask"):
-        for decision, reason in results:
-            if decision == priority:
-                return decision, reason
-
-    advice = list(
+def adapt_resolution(
+    resolution: Resolution, *, codex: bool
+) -> dict[str, object] | None:
+    """Convert an internal resolution to the active hook protocol."""
+    context = tuple(
         dict.fromkeys(
-            reason for decision, reason in results if decision == "allow" and reason
+            value for value in (resolution.reason, *resolution.advice) if value
         )
     )
-    if advice:
-        return "allow", "\n\n".join(advice)
-    if any(decision == "allow" for decision, _ in results):
-        return "allow", None
-    return "", None
+    message = "\n\n".join(context) or None
+    if resolution.disposition in {"deny", "ask"}:
+        return adapt_decision(
+            resolution.disposition,
+            message,
+            codex=codex,
+        )
+    if resolution.disposition == "allow":
+        return adapt_decision("allow", message, codex=codex)
+    if message:
+        # Claude requires a permission decision to carry advisory text. Codex can
+        # represent the same internal advice as additional context without allowing.
+        return adapt_decision("allow", message, codex=codex)
+    return None
 
 
 def main():
@@ -125,27 +112,10 @@ def main():
     if tool_name != "Bash":
         sys.exit(0)
 
-    checks: list[DecisionCheck] = [
-        lambda: check_weft_preflight(command, cwd),
-        lambda: check_research_script_audit(command, cwd),
-        lambda: check_git_in_jj_repo(command, cwd),
-        lambda: check_jj_split(command),
-        lambda: check_jj_squash(command, cwd),
-        lambda: check_pdflatex_with_justfile(command, cwd),
-        lambda: check_pip_command(command, cwd),
-        lambda: check_remote_jobs_absolute_directory(command),
-        lambda: check_remote_jobs_unquoted_tilde(command),
-        lambda: check_ssh_remote_jobs_access(command, cwd),
-        lambda: check_mutagen_flush_with_rsync_fallback(command),
-        lambda: check_all_commands_safe(command),
-        lambda: check_ruff_commands(command),
-        lambda: check_remote_jobs_script_instrumentation(command, cwd),
-        lambda: check_remote_jobs_wait_flag(command),
-        lambda: evaluate_transfer(command, cwd),
-    ]
-
-    decision, reason = resolve_checks(checks)
-    if decision:
-        emit_decision(decision, reason, codex=is_codex)
+    request = build_request(command, cwd)
+    resolution = evaluate_policies(request, POLICIES)
+    output = adapt_resolution(resolution, codex=is_codex)
+    if output is not None:
+        print(json.dumps(output))
 
     sys.exit(0)

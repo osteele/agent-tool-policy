@@ -6,7 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .shell import extract_commands, find_command, shell_writes_files
+from .models import FunctionPolicy, Request, decision_from_check
+from .shell import build_request, extract_commands, find_command
 
 SAFE_COMMANDS: dict[str, set[str] | None] = {
     # None means any subcommand is safe; a set means only those subcommands
@@ -44,6 +45,24 @@ SAFE_COMMANDS: dict[str, set[str] | None] = {
 }
 
 
+def _check_ruff_request(request: Request) -> tuple[str, str | None]:
+    if any(command.writes_files for command in request.commands):
+        return "", None
+    if not request.commands:
+        return "", None
+
+    for command in request.commands:
+        words = command.words
+        if not words:
+            continue
+        if os.path.basename(words[0]) != "ruff":
+            return "", None
+        if len(words) < 2 or words[1] not in ("format", "check"):
+            return "", None
+
+    return "allow", None
+
+
 def check_ruff_commands(command: str) -> tuple[str, str | None]:
     """
     Auto-approve commands that only contain ruff format and/or ruff check.
@@ -52,27 +71,7 @@ def check_ruff_commands(command: str) -> tuple[str, str | None]:
         ("allow", None) if command only contains ruff format/check
         ("", None) otherwise
     """
-    if shell_writes_files(command):
-        return "", None
-
-    cmds = extract_commands(command)
-    if not cmds:
-        return "", None
-
-    for words in cmds:
-        if not words:
-            continue
-        cmd_name = os.path.basename(words[0])
-        if cmd_name != "ruff":
-            return "", None
-        if len(words) < 2:
-            return "", None
-        subcmd = words[1]
-        if subcmd not in ("format", "check"):
-            return "", None
-
-    # All commands are ruff format or ruff check
-    return "allow", None
+    return _check_ruff_request(build_request(command, None))
 
 
 def _is_safe_command(words: list[str]) -> bool:
@@ -94,6 +93,16 @@ def _is_safe_command(words: list[str]) -> bool:
     return words[1] in allowed_subcmds
 
 
+def _check_all_commands_safe_request(request: Request) -> tuple[str, str | None]:
+    if any(command.writes_files for command in request.commands):
+        return "", None
+    if not request.commands:
+        return "", None
+    if all(_is_safe_command(list(command.words)) for command in request.commands):
+        return "allow", None
+    return "", None
+
+
 def check_all_commands_safe(command: str) -> tuple[str, str | None]:
     """
     Auto-approve when every command in a compound shell expression is safe/read-only.
@@ -102,17 +111,7 @@ def check_all_commands_safe(command: str) -> tuple[str, str | None]:
         ("allow", None) if all commands are safe
         ("", None) otherwise
     """
-    if shell_writes_files(command):
-        return "", None
-
-    cmds = extract_commands(command)
-    if not cmds:
-        return "", None
-
-    if all(_is_safe_command(words) for words in cmds):
-        return "allow", None
-
-    return "", None
+    return _check_all_commands_safe_request(build_request(command, None))
 
 
 def is_jj_repo(cwd: str) -> bool:
@@ -542,3 +541,54 @@ def check_pip_command(command: str, cwd: str | None) -> tuple[str, str | None]:
         return "deny", "Use `uv run` to run in the uv environment instead of pip."
     else:
         return "ask", "No pyproject.toml found. Are you sure you want to use pip?"
+
+
+def _cwd(request: Request) -> str | None:
+    return str(request.cwd) if request.cwd else None
+
+
+POLICIES = (
+    FunctionPolicy(
+        "development.git-in-jj",
+        900,
+        lambda request: decision_from_check(
+            check_git_in_jj_repo(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "development.jj-split",
+        890,
+        lambda request: decision_from_check(check_jj_split(request.command)),
+    ),
+    FunctionPolicy(
+        "development.jj-squash",
+        880,
+        lambda request: decision_from_check(
+            check_jj_squash(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "development.pdflatex-with-justfile",
+        870,
+        lambda request: decision_from_check(
+            check_pdflatex_with_justfile(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "development.pip",
+        860,
+        lambda request: decision_from_check(
+            check_pip_command(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "development.safe-commands",
+        300,
+        lambda request: decision_from_check(_check_all_commands_safe_request(request)),
+    ),
+    FunctionPolicy(
+        "development.ruff",
+        290,
+        lambda request: decision_from_check(_check_ruff_request(request)),
+    ),
+)

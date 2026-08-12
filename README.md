@@ -20,6 +20,23 @@ Shell commands are parsed by a small compiled helper built on
 and returns the command words and file-writing redirect metadata needed by the
 Python policy rules.
 
+### Policy architecture
+
+The hook parses each Bash request once into immutable `Request`, `Command`, and
+`Redirect` values. A command owns its redirect metadata, so rules can distinguish
+read-only input redirection from output that writes a file.
+
+Each policy domain (`development`, `remote_jobs`, `research`, and `transfers`)
+exports a `POLICIES` tuple. The central registry combines those tuples, and the
+engine evaluates every applicable policy. Policies return explicit `Decision`
+objects with a `deny`, `ask`, `allow`, or `advice` disposition.
+
+Resolution uses fixed safety precedence: `deny` before `ask` before `allow`.
+Numeric policy priority only breaks ties within the same disposition; it cannot
+make an allow override a denial. Advice is deduplicated and aggregated separately
+from the actionable result, then translated to the Claude or Codex hook protocol
+at the outer boundary.
+
 Research audit attestations are owned by
 `~/code/agent-tools/cross-agent-review`. This hook detects relevant commands, runs
 deterministic lint, and presents host-specific guidance; it delegates content

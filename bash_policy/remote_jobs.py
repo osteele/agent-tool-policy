@@ -5,6 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from .models import FunctionPolicy, Request, decision_from_check
 from .shell import find_command
 
 
@@ -347,3 +348,46 @@ def check_remote_jobs_script_instrumentation(
         f"See writing-remote-scripts skill for guidelines."
     )
     return "allow", advice
+
+
+def _cwd(request: Request) -> str | None:
+    return str(request.cwd) if request.cwd else None
+
+
+POLICIES = (
+    FunctionPolicy(
+        "remote-jobs.absolute-directory",
+        800,
+        lambda request: decision_from_check(
+            check_remote_jobs_absolute_directory(request.command)
+        ),
+    ),
+    FunctionPolicy(
+        "remote-jobs.unquoted-tilde",
+        790,
+        lambda request: decision_from_check(
+            check_remote_jobs_unquoted_tilde(request.command)
+        ),
+    ),
+    FunctionPolicy(
+        "remote-jobs.ssh-access",
+        780,
+        lambda request: decision_from_check(
+            check_ssh_remote_jobs_access(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "remote-jobs.script-instrumentation",
+        200,
+        lambda request: decision_from_check(
+            check_remote_jobs_script_instrumentation(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "remote-jobs.wait-flag",
+        190,
+        lambda request: decision_from_check(
+            check_remote_jobs_wait_flag(request.command)
+        ),
+    ),
+)

@@ -24,8 +24,18 @@ func main() {
 }
 
 type shellAnalysis struct {
-	Commands    [][]string `json:"commands"`
-	WritesFiles bool       `json:"writes_files"`
+	Commands []shellCommand `json:"commands"`
+}
+
+type shellCommand struct {
+	Words     []string        `json:"words"`
+	Redirects []shellRedirect `json:"redirects"`
+}
+
+type shellRedirect struct {
+	Operator   string  `json:"operator"`
+	Target     *string `json:"target"`
+	WritesFile bool    `json:"writes_file"`
 }
 
 func analyzeShell(reader io.Reader) (shellAnalysis, error) {
@@ -42,13 +52,36 @@ func analyzeShell(reader io.Reader) (shellAnalysis, error) {
 		return shellAnalysis{}, fmt.Errorf("parse command: %w", err)
 	}
 
-	analysis := shellAnalysis{Commands: make([][]string, 0)}
+	analysis := shellAnalysis{Commands: make([]shellCommand, 0)}
+	redirectsByCall := make(map[*syntax.CallExpr][]*syntax.Redirect)
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if redirect, ok := node.(*syntax.Redirect); ok && redirectWritesFile(source, redirect) {
-			analysis.WritesFiles = true
+		statement, ok := node.(*syntax.Stmt)
+		if !ok || len(statement.Redirs) == 0 {
+			return true
 		}
+		if call, ok := statement.Cmd.(*syntax.CallExpr); ok {
+			redirectsByCall[call] = append(redirectsByCall[call], statement.Redirs...)
+			return true
+		}
+		syntax.Walk(statement.Cmd, func(descendant syntax.Node) bool {
+			nested, ok := descendant.(*syntax.Stmt)
+			if !ok {
+				return true
+			}
+			if call, ok := nested.Cmd.(*syntax.CallExpr); ok {
+				redirectsByCall[call] = append(redirectsByCall[call], statement.Redirs...)
+			}
+			return true
+		})
+		return true
+	})
 
-		call, ok := node.(*syntax.CallExpr)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		statement, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := statement.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
@@ -57,7 +90,24 @@ func analyzeShell(reader io.Reader) (shellAnalysis, error) {
 		for _, word := range call.Args {
 			words = append(words, staticWord(source, word))
 		}
-		analysis.Commands = append(analysis.Commands, words)
+		callRedirects := redirectsByCall[call]
+		redirects := make([]shellRedirect, 0, len(callRedirects))
+		for _, redirect := range callRedirects {
+			var target *string
+			if redirect.Word != nil {
+				value := staticWord(source, redirect.Word)
+				target = &value
+			}
+			redirects = append(redirects, shellRedirect{
+				Operator:   redirect.Op.String(),
+				Target:     target,
+				WritesFile: redirectWritesFile(source, redirect),
+			})
+		}
+		analysis.Commands = append(analysis.Commands, shellCommand{
+			Words:     words,
+			Redirects: redirects,
+		})
 		return true
 	})
 	return analysis, nil

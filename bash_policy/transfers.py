@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from .models import FunctionPolicy, Request, decision_from_check
 from .shell import extract_commands, find_command
 
 EXCLUDED_DIRS = {
@@ -467,3 +468,25 @@ def evaluate_transfer(command: str, cwd: str | None = None) -> tuple[str, str | 
 
     # Default: require confirmation for any other scp/rsync
     return "ask", f"{cmd} operation requires confirmation"
+
+
+def _cwd(request: Request) -> str | None:
+    return str(request.cwd) if request.cwd else None
+
+
+POLICIES = (
+    FunctionPolicy(
+        "transfers.mutagen-fallback",
+        700,
+        lambda request: decision_from_check(
+            check_mutagen_flush_with_rsync_fallback(request.command)
+        ),
+    ),
+    FunctionPolicy(
+        "transfers.evaluate",
+        100,
+        lambda request: decision_from_check(
+            evaluate_transfer(request.command, _cwd(request))
+        ),
+    ),
+)

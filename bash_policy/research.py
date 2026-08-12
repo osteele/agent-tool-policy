@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .models import FunctionPolicy, Request, decision_from_check
+
 PREFLIGHT_MARKER = "preflight-checked"
 
 
@@ -353,3 +355,25 @@ def check_research_script_audit(
         )
     except (OSError, json.JSONDecodeError, re.error):
         return "", None
+
+
+def _cwd(request: Request) -> str | None:
+    return str(request.cwd) if request.cwd else None
+
+
+POLICIES = (
+    FunctionPolicy(
+        "research.weft-preflight",
+        1000,
+        lambda request: decision_from_check(
+            check_weft_preflight(request.command, _cwd(request))
+        ),
+    ),
+    FunctionPolicy(
+        "research.local-script-audit",
+        990,
+        lambda request: decision_from_check(
+            check_research_script_audit(request.command, _cwd(request))
+        ),
+    ),
+)

@@ -71,6 +71,12 @@ SQL`,
 			writesFile: true,
 		},
 		{
+			name:       "compound output redirect writes file",
+			command:    "{ echo changed; } > file",
+			want:       [][]string{{"echo", "changed"}},
+			writesFile: true,
+		},
+		{
 			name:       "append redirect writes file",
 			command:    "cat source >> destination",
 			want:       [][]string{{"cat", "source"}},
@@ -111,11 +117,19 @@ SQL`,
 			if err != nil {
 				t.Fatalf("analyzeShell() error = %v", err)
 			}
-			if !reflect.DeepEqual(got.Commands, test.want) {
-				t.Fatalf("analyzeShell().Commands = %#v, want %#v", got.Commands, test.want)
+			words := make([][]string, 0, len(got.Commands))
+			writesFile := false
+			for _, command := range got.Commands {
+				words = append(words, command.Words)
+				for _, redirect := range command.Redirects {
+					writesFile = writesFile || redirect.WritesFile
+				}
 			}
-			if got.WritesFiles != test.writesFile {
-				t.Fatalf("analyzeShell().WritesFiles = %v, want %v", got.WritesFiles, test.writesFile)
+			if !reflect.DeepEqual(words, test.want) {
+				t.Fatalf("analyzeShell() words = %#v, want %#v", words, test.want)
+			}
+			if writesFile != test.writesFile {
+				t.Fatalf("analyzeShell() writes file = %v, want %v", writesFile, test.writesFile)
 			}
 		})
 	}

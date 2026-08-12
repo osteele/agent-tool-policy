@@ -11,13 +11,21 @@ from bash_policy.development import (
     check_pip_command,
     check_ruff_commands,
 )
-from bash_policy.hook import adapt_decision, resolve_checks
+from bash_policy.engine import evaluate_policies
+from bash_policy.hook import adapt_decision
+from bash_policy.models import Decision, FunctionPolicy, Request
+from bash_policy.registry import POLICIES
 from bash_policy.remote_jobs import (
     check_remote_jobs_absolute_directory,
     check_remote_jobs_unquoted_tilde,
     check_remote_jobs_wait_flag,
 )
-from bash_policy.shell import extract_commands, find_command, shell_writes_files
+from bash_policy.shell import (
+    build_request,
+    extract_commands,
+    find_command,
+    shell_writes_files,
+)
 from bash_policy.transfers import (
     evaluate_transfer,
     parse_rsync_command,
@@ -40,6 +48,20 @@ class ShellParsingTest(unittest.TestCase):
         self.assertTrue(shell_writes_files("cat source >> destination"))
         self.assertFalse(shell_writes_files("cat < source"))
         self.assertFalse(shell_writes_files("echo warning >&2"))
+
+    def test_redirect_metadata_belongs_to_its_command(self) -> None:
+        request = build_request("echo changed > file; cat source", None)
+        self.assertTrue(request.commands[0].writes_files)
+        self.assertFalse(request.commands[1].writes_files)
+
+    def test_compound_redirect_propagates_to_nested_command(self) -> None:
+        request = build_request("{ echo changed; } > file", None)
+        self.assertTrue(request.commands[0].writes_files)
+
+    def test_outer_redirect_does_not_attach_to_command_substitution(self) -> None:
+        request = build_request('echo "$(git status)" > file', None)
+        self.assertTrue(request.commands[0].writes_files)
+        self.assertFalse(request.commands[1].writes_files)
 
     def test_mvdan_parser_supports_bash_constructs(self) -> None:
         commands = (
@@ -153,32 +175,68 @@ class HookProtocolAdapterTest(unittest.TestCase):
     def test_deny_takes_priority_and_all_checks_run(self) -> None:
         calls: list[str] = []
 
-        def result(name: str, decision: str, reason: str | None = None):
-            def check() -> tuple[str, str | None]:
+        def policy(name: str, priority: int, decision: Decision):
+            def evaluate(request: Request) -> Decision:
                 calls.append(name)
-                return decision, reason
+                return decision
 
-            return check
+            return FunctionPolicy(name, priority, evaluate)
 
-        decision = resolve_checks(
+        resolution = evaluate_policies(
+            Request("echo ok", None, ()),
             [
-                result("advice", "allow", "warning"),
-                result("deny", "deny", "blocked"),
-                result("late", "allow"),
-            ]
+                policy("advice", 100, Decision("advice", "warning")),
+                policy("deny", 1, Decision("deny", "blocked")),
+                policy("late", 200, Decision("allow")),
+            ],
         )
-        self.assertEqual(decision, ("deny", "blocked"))
+        self.assertEqual(resolution.disposition, "deny")
+        self.assertEqual(resolution.reason, "blocked")
+        self.assertEqual(resolution.advice, ("warning",))
         self.assertEqual(calls, ["advice", "deny", "late"])
 
     def test_ask_takes_priority_over_advice(self) -> None:
-        decision = resolve_checks(
+        resolution = evaluate_policies(
+            Request("echo ok", None, ()),
             [
-                lambda: ("allow", "warning"),
-                lambda: ("ask", "confirm"),
-                lambda: ("allow", None),
-            ]
+                FunctionPolicy(
+                    "advice", 100, lambda request: Decision("advice", "warning")
+                ),
+                FunctionPolicy("ask", 1, lambda request: Decision("ask", "confirm")),
+                FunctionPolicy("allow", 200, lambda request: Decision("allow")),
+            ],
         )
-        self.assertEqual(decision, ("ask", "confirm"))
+        self.assertEqual(resolution.disposition, "ask")
+        self.assertEqual(resolution.reason, "confirm")
+
+    def test_priority_breaks_ties_within_a_disposition(self) -> None:
+        resolution = evaluate_policies(
+            Request("echo ok", None, ()),
+            [
+                FunctionPolicy("low", 1, lambda request: Decision("deny", "low")),
+                FunctionPolicy("high", 2, lambda request: Decision("deny", "high")),
+            ],
+        )
+        self.assertEqual(resolution.reason, "high")
+        self.assertEqual(resolution.policy_name, "high")
+
+    def test_advice_is_prioritized_deduplicated_and_aggregated(self) -> None:
+        resolution = evaluate_policies(
+            Request("echo ok", None, ()),
+            [
+                FunctionPolicy("low", 1, lambda request: Decision("advice", "low")),
+                FunctionPolicy("high", 3, lambda request: Decision("advice", "high")),
+                FunctionPolicy(
+                    "duplicate", 2, lambda request: Decision("advice", "low")
+                ),
+            ],
+        )
+        self.assertIsNone(resolution.disposition)
+        self.assertEqual(resolution.advice, ("high", "low"))
+
+    def test_registry_has_unique_policy_names(self) -> None:
+        names = [policy.name for policy in POLICIES]
+        self.assertEqual(len(names), len(set(names)))
 
     def test_claude_bare_allow_is_preserved(self) -> None:
         output = adapt_decision("allow", codex=False)
