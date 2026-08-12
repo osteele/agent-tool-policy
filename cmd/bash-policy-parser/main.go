@@ -5,27 +5,33 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
 func main() {
-	commands, err := parseCommands(os.Stdin)
+	analysis, err := analyzeShell(os.Stdin)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(commands); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(analysis); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func parseCommands(reader io.Reader) ([][]string, error) {
+type shellAnalysis struct {
+	Commands    [][]string `json:"commands"`
+	WritesFiles bool       `json:"writes_files"`
+}
+
+func analyzeShell(reader io.Reader) (shellAnalysis, error) {
 	source, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("read command: %w", err)
+		return shellAnalysis{}, fmt.Errorf("read command: %w", err)
 	}
 
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(
@@ -33,11 +39,15 @@ func parseCommands(reader io.Reader) ([][]string, error) {
 		"",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("parse command: %w", err)
+		return shellAnalysis{}, fmt.Errorf("parse command: %w", err)
 	}
 
-	commands := make([][]string, 0)
+	analysis := shellAnalysis{Commands: make([][]string, 0)}
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if redirect, ok := node.(*syntax.Redirect); ok && redirectWritesFile(source, redirect) {
+			analysis.WritesFiles = true
+		}
+
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
@@ -47,10 +57,36 @@ func parseCommands(reader io.Reader) ([][]string, error) {
 		for _, word := range call.Args {
 			words = append(words, staticWord(source, word))
 		}
-		commands = append(commands, words)
+		analysis.Commands = append(analysis.Commands, words)
 		return true
 	})
-	return commands, nil
+	return analysis, nil
+}
+
+func redirectWritesFile(source []byte, redirect *syntax.Redirect) bool {
+	switch redirect.Op {
+	case syntax.RdrOut,
+		syntax.AppOut,
+		syntax.RdrInOut,
+		syntax.RdrClob,
+		syntax.RdrAll,
+		syntax.RdrAllClob,
+		syntax.AppAll,
+		syntax.AppAllClob:
+		return redirect.Word == nil || staticWord(source, redirect.Word) != "/dev/null"
+	case syntax.DplOut:
+		if redirect.Word == nil {
+			return true
+		}
+		target := staticWord(source, redirect.Word)
+		if target == "-" {
+			return false
+		}
+		_, err := strconv.ParseUint(target, 10, 64)
+		return err != nil
+	default:
+		return false
+	}
 }
 
 func staticWord(source []byte, word *syntax.Word) string {

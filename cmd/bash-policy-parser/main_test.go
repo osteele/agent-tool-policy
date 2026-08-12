@@ -8,9 +8,10 @@ import (
 
 func TestParseCommands(t *testing.T) {
 	tests := []struct {
-		name    string
-		command string
-		want    [][]string
+		name       string
+		command    string
+		want       [][]string
+		writesFile bool
 	}{
 		{
 			name:    "compound",
@@ -63,23 +64,65 @@ select 'git commit';
 SQL`,
 			want: [][]string{{"sqlite3", "database.sqlite"}},
 		},
+		{
+			name:       "output redirect writes file",
+			command:    "echo changed > file",
+			want:       [][]string{{"echo", "changed"}},
+			writesFile: true,
+		},
+		{
+			name:       "append redirect writes file",
+			command:    "cat source >> destination",
+			want:       [][]string{{"cat", "source"}},
+			writesFile: true,
+		},
+		{
+			name:       "read write redirect writes file",
+			command:    "cat <> state",
+			want:       [][]string{{"cat"}},
+			writesFile: true,
+		},
+		{
+			name:    "input redirect does not write",
+			command: "cat < source",
+			want:    [][]string{{"cat"}},
+		},
+		{
+			name:    "file descriptor redirect does not write",
+			command: "echo warning >&2",
+			want:    [][]string{{"echo", "warning"}},
+		},
+		{
+			name:       "legacy combined redirect writes file",
+			command:    "echo warning >& output.log",
+			want:       [][]string{{"echo", "warning"}},
+			writesFile: true,
+		},
+		{
+			name:    "dev null output does not write file",
+			command: "echo ignored >/dev/null",
+			want:    [][]string{{"echo", "ignored"}},
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := parseCommands(strings.NewReader(test.command))
+			got, err := analyzeShell(strings.NewReader(test.command))
 			if err != nil {
-				t.Fatalf("parseCommands() error = %v", err)
+				t.Fatalf("analyzeShell() error = %v", err)
 			}
-			if !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("parseCommands() = %#v, want %#v", got, test.want)
+			if !reflect.DeepEqual(got.Commands, test.want) {
+				t.Fatalf("analyzeShell().Commands = %#v, want %#v", got.Commands, test.want)
+			}
+			if got.WritesFiles != test.writesFile {
+				t.Fatalf("analyzeShell().WritesFiles = %v, want %v", got.WritesFiles, test.writesFile)
 			}
 		})
 	}
 }
 
 func TestParseCommandsRejectsInvalidSyntax(t *testing.T) {
-	if _, err := parseCommands(strings.NewReader("echo 'unterminated")); err == nil {
-		t.Fatal("parseCommands() unexpectedly accepted invalid syntax")
+	if _, err := analyzeShell(strings.NewReader("echo 'unterminated")); err == nil {
+		t.Fatal("analyzeShell() unexpectedly accepted invalid syntax")
 	}
 }

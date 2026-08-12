@@ -12,7 +12,7 @@ PARSER_DIR="$REPO_DIR/.bin"
 PARSER="$PARSER_DIR/bash-policy-parser"
 
 mkdir -p "$PARSER_DIR"
-go build -buildvcs=false -o "$PARSER" "$REPO_DIR/cmd/bash-policy-parser"
+go -C "$REPO_DIR" build -buildvcs=false -o "$PARSER" ./cmd/bash-policy-parser
 echo "Built $PARSER"
 mkdir -p "$HOOKS_DIR"
 ln -sfn "$SOURCE" "$TARGET"

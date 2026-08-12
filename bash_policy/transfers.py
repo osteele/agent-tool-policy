@@ -335,24 +335,25 @@ def is_excluded(dirname: str, excludes: set[str]) -> bool:
     return False
 
 
-def check_source_for_excluded_dirs(parsed: dict) -> tuple[str, str | None]:
+def check_source_for_excluded_dirs(
+    parsed: dict, cwd: str | None = None
+) -> tuple[str, str | None]:
     """
     Check if source directories contain dirs that should be excluded.
     Returns ("deny", reason) if problematic dirs exist without exclusions.
     Returns ("", None) if okay.
     """
-    code_dir = os.path.expanduser("~/code")
+    code_dir = Path(os.path.expanduser("~/code")).resolve()
 
     for source in parsed["sources"]:
         if is_remote_path(source):
             continue
 
-        local_source = os.path.expanduser(source.rstrip("/"))
-
-        if not local_source.startswith(code_dir):
+        local_source = get_local_path(source.rstrip("/"), cwd)
+        source_path = Path(local_source).resolve()
+        if not source_path.is_relative_to(code_dir):
             continue
 
-        source_path = Path(local_source)
         if not source_path.exists():
             continue
 
@@ -422,7 +423,7 @@ def evaluate_transfer(command: str, cwd: str | None = None) -> tuple[str, str | 
     # === OUTBOUND: Local to Remote ===
     if local_sources and dest_is_remote:
         # Check for excluded dirs that should be filtered
-        decision, reason = check_source_for_excluded_dirs(parsed)
+        decision, reason = check_source_for_excluded_dirs(parsed, cwd)
         if decision == "deny":
             return decision, reason
 
@@ -435,7 +436,7 @@ def evaluate_transfer(command: str, cwd: str | None = None) -> tuple[str, str | 
 
         # Check if mutagen is handling this sync
         for source in local_sources:
-            local_source = os.path.abspath(os.path.expanduser(source.rstrip("/")))
+            local_source = get_local_path(source.rstrip("/"), cwd)
             if local_source.startswith(code_dir) and remote_host:
                 is_mutagen, _ = is_mutagen_handling_sync(local_source, remote_host)
                 if is_mutagen:

@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .shell import extract_commands, find_command
+from .shell import extract_commands, find_command, shell_writes_files
 
 SAFE_COMMANDS: dict[str, set[str] | None] = {
     # None means any subcommand is safe; a set means only those subcommands
@@ -22,8 +22,8 @@ SAFE_COMMANDS: dict[str, set[str] | None] = {
     "remote-jobs": {"list", "log", "status", "mark-processed"},
     "weft": {"list", "log", "status", "mark-processed"},
     "ruff": {"check", "format"},
-    "jj": {"log", "status", "diff", "show", "bookmark"},
-    "git": {"log", "status", "diff", "show", "worktree"},
+    "jj": {"log", "status", "diff", "show"},
+    "git": {"log", "status", "diff", "show"},
     "grep": None,
     "ls": None,
     "obsidian": {
@@ -52,6 +52,9 @@ def check_ruff_commands(command: str) -> tuple[str, str | None]:
         ("allow", None) if command only contains ruff format/check
         ("", None) otherwise
     """
+    if shell_writes_files(command):
+        return "", None
+
     cmds = extract_commands(command)
     if not cmds:
         return "", None
@@ -77,6 +80,10 @@ def _is_safe_command(words: list[str]) -> bool:
     if not words:
         return False
     cmd_name = os.path.basename(words[0])
+    if cmd_name == "jj" and words[1:3] == ["bookmark", "list"]:
+        return True
+    if cmd_name == "git" and words[1:3] == ["worktree", "list"]:
+        return True
     if cmd_name not in SAFE_COMMANDS:
         return False
     allowed_subcmds = SAFE_COMMANDS[cmd_name]
@@ -95,6 +102,9 @@ def check_all_commands_safe(command: str) -> tuple[str, str | None]:
         ("allow", None) if all commands are safe
         ("", None) otherwise
     """
+    if shell_writes_files(command):
+        return "", None
+
     cmds = extract_commands(command)
     if not cmds:
         return "", None
@@ -143,8 +153,8 @@ def _git_shadow_is_in_scope(executable: str, cwd: str) -> bool:
     return invoked_git == shadow_git.resolve()
 
 
-def _git_subcommand(words: list[str]) -> str | None:
-    """Return Git's subcommand after its global options."""
+def _git_subcommand_index(words: list[str]) -> int | None:
+    """Return the index of Git's subcommand after its global options."""
     options_with_separate_values = {
         "-C",
         "-c",
@@ -164,8 +174,98 @@ def _git_subcommand(words: list[str]) -> str | None:
         if word.startswith("-"):
             index += 1
             continue
-        return word
+        return index
     return None
+
+
+def _git_branch_mode(args: list[str]) -> str:
+    """Classify Git branch arguments as read-only, mutating, or unknown."""
+    mutating_options = {
+        "-d",
+        "-D",
+        "-m",
+        "-M",
+        "-c",
+        "-C",
+        "-f",
+        "--copy",
+        "--create-reflog",
+        "--delete",
+        "--edit-description",
+        "--force",
+        "--move",
+        "--no-track",
+        "--recurse-submodules",
+        "--set-upstream-to",
+        "--track",
+        "--unset-upstream",
+    }
+    for arg in args:
+        option = arg.split("=", 1)[0]
+        if option in mutating_options:
+            return "write"
+
+    read_flags = {
+        "-a",
+        "-r",
+        "-v",
+        "-vv",
+        "--all",
+        "--ignore-case",
+        "--list",
+        "--no-abbrev",
+        "--no-color",
+        "--no-column",
+        "--omit-empty",
+        "--remotes",
+        "--show-current",
+        "--verbose",
+    }
+    read_options = {
+        "--abbrev",
+        "--color",
+        "--column",
+        "--contains",
+        "--format",
+        "--merged",
+        "--no-contains",
+        "--no-merged",
+        "--points-at",
+        "--sort",
+    }
+
+    list_patterns = False
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return "read" if list_patterns else "unknown"
+        if arg == "--list":
+            list_patterns = True
+            index += 1
+            continue
+        if arg in read_flags:
+            index += 1
+            continue
+        if any(arg.startswith(f"{option}=") for option in read_options):
+            index += 1
+            continue
+        if arg in read_options:
+            if index + 1 < len(args) and not args[index + 1].startswith("-"):
+                index += 2
+            else:
+                index += 1
+            continue
+        if arg.startswith("-") and set(arg[1:]) <= {"a", "r", "v"}:
+            index += 1
+            continue
+        if list_patterns and not arg.startswith("-"):
+            index += 1
+            continue
+        if not arg.startswith("-"):
+            return "write"
+        return "unknown"
+    return "read"
 
 
 def _git_without_shadow_warning(subcmd: str) -> tuple[str, str]:
@@ -188,9 +288,9 @@ def _git_denied_reason(subcmd: str) -> str:
 def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None]:
     """
     Check if a git command is being used in a jj repository.
-    Deny git commit/add/stash/apply unless the command includes an intentional
-    override comment. Warn on git log/diff/show/status/branch when that invocation does
-    not resolve to the llm-shadow-commands Git wrapper.
+    Deny git commit/add/stash/apply and mutating git branch operations unless the
+    command includes an intentional override comment. Warn on read-only Git commands
+    when that invocation does not resolve to the llm-shadow-commands Git wrapper.
 
     The executable-path check catches explicit bypasses such as /usr/bin/git even
     when the shadow-command directory is otherwise on PATH.
@@ -218,26 +318,41 @@ def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None
 
     # Try structured parsing first
     parsed_cmds = extract_commands(command)
-    git_commands: list[tuple[str, str]] = []
+    git_commands: list[tuple[str, str, list[str]]] = []
     for cmd_words in parsed_cmds:
         if os.path.basename(cmd_words[0]) == "git" and len(cmd_words) >= 2:
-            subcmd = _git_subcommand(cmd_words)
-            if subcmd is not None:
-                git_commands.append((cmd_words[0], subcmd))
+            subcmd_index = _git_subcommand_index(cmd_words)
+            if subcmd_index is not None:
+                git_commands.append(
+                    (
+                        cmd_words[0],
+                        cmd_words[subcmd_index],
+                        cmd_words[subcmd_index + 1 :],
+                    )
+                )
 
-    for _, subcmd in git_commands:
-        if subcmd in denied_subcommands:
+    for _, subcmd, args in git_commands:
+        if subcmd in denied_subcommands or (
+            subcmd == "branch" and _git_branch_mode(args) == "write"
+        ):
             return "deny", _git_denied_reason(subcmd)
 
-    for executable, subcmd in git_commands:
-        if subcmd in shadowed_subcommands and not _git_shadow_is_in_scope(
-            executable, cwd
-        ):
+    for executable, subcmd, args in git_commands:
+        is_shadowed_read = subcmd in shadowed_subcommands and (
+            subcmd != "branch" or _git_branch_mode(args) == "read"
+        )
+        if is_shadowed_read and not _git_shadow_is_in_scope(executable, cwd):
             return _git_without_shadow_warning(subcmd)
 
     # Regex fallback when structured parsing fails.
     if not parsed_cmds:
-        git_pattern = r"\bgit\s+(commit|add|stash|apply|branch|log|diff|show|status)\b"
+        branch_mutation = (
+            r"\bgit\s+branch\s+"
+            r"(?:-[dDmMcCf]\b|--(?:copy|create-reflog|delete|edit-description|force|move|no-track|recurse-submodules|set-upstream-to|track|unset-upstream)\b)"
+        )
+        if re.search(branch_mutation, command):
+            return "deny", _git_denied_reason("branch")
+        git_pattern = r"\bgit\s+(commit|add|stash|apply|log|diff|show|status)\b"
         subcommands = [match.group(1) for match in re.finditer(git_pattern, command)]
         for subcmd in subcommands:
             if subcmd in denied_subcommands:

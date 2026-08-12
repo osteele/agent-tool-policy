@@ -24,6 +24,8 @@ from .remote_jobs import (
 from .research import check_research_script_audit, check_weft_preflight
 from .transfers import check_mutagen_flush_with_rsync_fallback, evaluate_transfer
 
+DecisionCheck = Callable[[], tuple[str, str | None]]
+
 
 def adapt_decision(
     decision: str,
@@ -81,6 +83,27 @@ def emit_decision(
     sys.exit(0)
 
 
+def resolve_checks(checks: list[DecisionCheck]) -> tuple[str, str | None]:
+    """Evaluate every check and select the highest-priority result."""
+    results = [check() for check in checks]
+
+    for priority in ("deny", "ask"):
+        for decision, reason in results:
+            if decision == priority:
+                return decision, reason
+
+    advice = list(
+        dict.fromkeys(
+            reason for decision, reason in results if decision == "allow" and reason
+        )
+    )
+    if advice:
+        return "allow", "\n\n".join(advice)
+    if any(decision == "allow" for decision, _ in results):
+        return "allow", None
+    return "", None
+
+
 def main():
     # Use select to avoid blocking indefinitely on stdin (helps with signal handling)
     ready, _, _ = select.select([sys.stdin], [], [], 2.0)
@@ -102,10 +125,7 @@ def main():
     if tool_name != "Bash":
         sys.exit(0)
 
-    # Deny checks run first so they aren't short-circuited by allow checks
-    # check_git_in_jj_repo must deny Git mutations or warn about unshadowed Git
-    # reads before check_all_commands_safe can auto-approve them.
-    checks: list[Callable[[], tuple[str, str | None]]] = [
+    checks: list[DecisionCheck] = [
         lambda: check_weft_preflight(command, cwd),
         lambda: check_research_script_audit(command, cwd),
         lambda: check_git_in_jj_repo(command, cwd),
@@ -124,9 +144,8 @@ def main():
         lambda: evaluate_transfer(command, cwd),
     ]
 
-    for check in checks:
-        decision, reason = check()
-        if decision:
-            emit_decision(decision, reason, codex=is_codex)
+    decision, reason = resolve_checks(checks)
+    if decision:
+        emit_decision(decision, reason, codex=is_codex)
 
     sys.exit(0)

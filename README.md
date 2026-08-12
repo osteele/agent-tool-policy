@@ -17,7 +17,8 @@ The executable is intentionally small. Policy implementations live in the
 
 Shell commands are parsed by a small compiled helper built on
 [`mvdan/sh`](https://github.com/mvdan/sh). The helper runs once per hook invocation
-and returns only the command words needed by the Python policy rules.
+and returns the command words and file-writing redirect metadata needed by the
+Python policy rules.
 
 Research audit attestations are owned by
 `~/code/agent-tools/cross-agent-review`. This hook detects relevant commands, runs

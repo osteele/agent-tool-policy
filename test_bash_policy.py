@@ -131,6 +131,26 @@ class GitInJjRepoTest(unittest.TestCase):
         decision, _ = decide(repo, "git commit -m x")
         self.assertEqual(decision, "deny")
 
+    def test_git_advice_does_not_skip_later_pip_denial(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        (repo / "pyproject.toml").touch()
+        decision, reason = decide(repo, "/usr/bin/git log; pip install requests")
+        self.assertEqual(decision, "deny")
+        self.assertIn("uv", reason)
+
+    def test_mutating_git_branch_operations_are_denied(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        for command in (
+            "/usr/bin/git branch -D topic",
+            "git branch -m old new",
+            "git branch topic",
+        ):
+            with self.subTest(command=command):
+                decision, _ = decide(repo, command)
+                self.assertEqual(decision, "deny")
+
     def test_git_text_in_quoted_python_heredoc_is_not_a_command(self):
         repo = self.tmp / "repo"
         (repo / ".jj").mkdir(parents=True)
@@ -164,6 +184,17 @@ class GitInJjRepoTest(unittest.TestCase):
         )
         self.assertEqual(decision, "")
         self.assertEqual(reason, "")
+
+    def test_read_only_git_branch_warns_without_shadow_wrapper(self):
+        repo = self.tmp / "repo"
+        (repo / ".jj").mkdir(parents=True)
+        decision, reason = decide(
+            repo,
+            "/usr/bin/git branch --show-current",
+            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+        )
+        self.assertEqual(decision, "allow")
+        self.assertIn("jj bookmark list", reason)
 
     def test_override_comment_allows_it(self):
         repo = self.tmp / "repo"
@@ -347,6 +378,24 @@ class BashSyntaxTest(unittest.TestCase):
 
     def test_hook_fails_open_for_invalid_syntax(self):
         self.assertEqual(invoke_hook(self.tmp, "echo 'unterminated"), {})
+
+
+class SetupTest(unittest.TestCase):
+    def test_setup_works_outside_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home = tmp_path / "home"
+            home.mkdir()
+            result = subprocess.run(
+                [str(HERE / "setup")],
+                cwd=tmp_path,
+                env={**os.environ, "HOME": str(home)},
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((home / ".claude/hooks/bash-policy-hook").is_symlink())
 
 
 if __name__ == "__main__":

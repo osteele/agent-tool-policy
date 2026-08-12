@@ -5,24 +5,32 @@ import os
 import subprocess
 from functools import cache
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 
 PARSER = Path(__file__).resolve().parent.parent / ".bin" / "bash-policy-parser"
 PARSER_TIMEOUT_SECONDS = 1
 
 
-@cache
-def extract_commands(command: str) -> list[list[str]]:
-    """
-    Parse a shell command with the mvdan/sh helper and return its simple commands.
+class ShellAnalysis(TypedDict):
+    commands: list[list[str]]
+    writes_files: bool
 
-    Each command is represented as word strings. Shell syntax such as redirects,
-    pipelines, and list operators is omitted. Returns an empty list when the helper
-    is missing, times out, or cannot parse the input.
+
+def _empty_analysis() -> ShellAnalysis:
+    return {"commands": [], "writes_files": False}
+
+
+@cache
+def _analyze_shell(command: str, parser: str) -> ShellAnalysis:
+    """
+    Parse a shell command with the mvdan/sh helper.
+
+    Returns an empty analysis when the helper is missing, times out, emits an
+    invalid response, or cannot parse the input.
     """
     try:
         result = subprocess.run(
-            [os.environ.get("BASH_POLICY_PARSER", str(PARSER))],
+            [parser],
             input=command,
             capture_output=True,
             check=False,
@@ -30,10 +38,36 @@ def extract_commands(command: str) -> list[list[str]]:
             timeout=PARSER_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
-            return []
-        return cast(list[list[str]], json.loads(result.stdout))
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
-        return []
+            return _empty_analysis()
+        payload = cast(dict[str, object], json.loads(result.stdout))
+        return {
+            "commands": cast(list[list[str]], payload["commands"]),
+            "writes_files": cast(bool, payload["writes_files"]),
+        }
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+        TypeError,
+    ):
+        return _empty_analysis()
+
+
+def analyze_shell(command: str) -> ShellAnalysis:
+    """Return the cached structured analysis for a shell command."""
+    parser = os.environ.get("BASH_POLICY_PARSER", str(PARSER))
+    return _analyze_shell(command, parser)
+
+
+def extract_commands(command: str) -> list[list[str]]:
+    """Return the simple command words from a shell command."""
+    return analyze_shell(command)["commands"]
+
+
+def shell_writes_files(command: str) -> bool:
+    """Return whether shell redirections can write to a filesystem path."""
+    return analyze_shell(command)["writes_files"]
 
 
 def find_command(command: str, name: str) -> list[str] | None:
