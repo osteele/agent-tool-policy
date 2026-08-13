@@ -15,6 +15,7 @@ reliably infer. They use repository state, parsed command structure, local tools
 and saved attestations to enforce rules such as:
 
 - use Jujutsu instead of mutating Git state in a Jujutsu repository
+- keep Jujutsu commands out of editors and interactive UIs that nobody can close
 - use a project's configured build command instead of bypassing it
 - validate `remote-jobs` and Weft invocations against local workflow rules
 - coordinate transfers with Mutagen and protected destination conventions
@@ -73,6 +74,22 @@ In jj repositories, Git mutations are denied by default. Read-oriented Git
 commands produce a warning when they do not resolve to
 `~/code/agent-tools/llm-shadow-commands/git`, because an unshadowed Git view can lag jj's
 operation and revision state.
+
+jj commands that would block on an editor or an interactive UI are denied:
+`describe`, `commit`, and `squash` without a message; `split` without both a
+message and explicit paths; `resolve` other than `--list` or `--tool
+:ours`/`:theirs`; `diffedit`, `arrange`, `config edit`, and `sparse edit`; and
+any subcommand invoked with `-i`/`--interactive`, `--editor`, or a `--tool`
+that selects changes. `--tool` on `diff`, `log`, and `show` names a diff
+formatter rather than an editor, and is left alone. Each denial names the
+non-interactive alternative — the rules were checked against jj 0.44 by running
+each form with a recording editor. Both escapes are comments on the command
+itself, so they survive the hook without changing what runs:
+
+```bash
+git commit -m 'fix'  # intentionally ignoring jj
+jj describe          # intentionally interactive
+```
 
 The hook adapts its output protocol to the caller. Claude receives native
 `permissionDecision` values. For Codex PreToolUse, bare allows emit no output,

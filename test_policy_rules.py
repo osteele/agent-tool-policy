@@ -9,6 +9,7 @@ from pathlib import Path
 from bash_policy.adapters import CLAUDE_ADAPTER, CODEX_ADAPTER
 from bash_policy.development import (
     check_all_commands_safe,
+    check_jj_interactive_commands,
     check_pip_command,
     check_ruff_commands,
 )
@@ -152,6 +153,147 @@ class DevelopmentPolicyTest(unittest.TestCase):
             Path(tmp, "pyproject.toml").touch()
             decision, _ = check_pip_command("pip install requests", tmp)
         self.assertEqual(decision, "deny")
+
+
+class JjInteractiveCommandTest(unittest.TestCase):
+    def assert_denied(self, command: str, cwd: str | None = None) -> str:
+        decision, reason = check_jj_interactive_commands(command, cwd)
+        self.assertEqual(decision, "deny", command)
+        assert reason is not None
+        return reason
+
+    def assert_allowed(self, command: str, cwd: str | None = None) -> None:
+        decision, _ = check_jj_interactive_commands(command, cwd)
+        self.assertEqual(decision, "", command)
+
+    def test_editor_opening_commands_are_denied(self) -> None:
+        for command in (
+            "jj describe",
+            "jj desc",
+            "jj commit",
+            "jj squash",
+            "jj diffedit",
+            "jj arrange",
+            "jj resolve",
+            "jj resolve src/main.py",
+            "jj config edit",
+            "jj sparse edit",
+            "jj restore -i",
+            "jj absorb -i",
+            "jj commit -i -m 'wip'",
+            "jj squash --tool meld",
+            "jj describe -m 'wip' --editor",
+            "jj unsquash --interactive",
+        ):
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
+    def test_non_interactive_forms_are_not_denied(self) -> None:
+        for command in (
+            "jj describe -m 'fix: thing'",
+            "jj describe --message='fix: thing'",
+            "jj describe --stdin",
+            "jj commit -m 'feat: thing'",
+            "jj squash -m 'fix: thing'",
+            "jj squash -u",
+            "jj squash --use-destination-message",
+            "jj resolve --list",
+            "jj resolve --tool :ours",
+            "jj restore src/main.py",
+            "jj absorb",
+            "jj log",
+            "jj edit @-",
+            "jj new",
+            "jj config list",
+        ):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_split_is_allowed_when_paths_and_a_message_are_given(self) -> None:
+        for command in (
+            "jj split -m 'part one' a.txt",
+            "jj split -p -m 'part one' a.txt",
+            "jj split --message='part one' a.txt b.txt",
+            "jj split -m'part one' a.txt",
+            "jj split -pm 'part one' a.txt",
+            "jj split -m 'part one' -- a.txt",
+        ):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_split_is_denied_when_it_would_open_an_editor(self) -> None:
+        # No filesets: jj opens a diff editor to select the changes.
+        self.assertIn("/jj-split", self.assert_denied("jj split"))
+        self.assertIn("/jj-split", self.assert_denied("jj split -m 'part one'"))
+        self.assertIn("/jj-split", self.assert_denied("jj split -m 'part one' -r @"))
+        # A cluster whose last letter takes the value leaves no fileset behind.
+        self.assertIn("/jj-split", self.assert_denied("jj split -pm 'part one'"))
+        # Filesets but no message: jj opens an editor per new description.
+        self.assertIn("-m/--message", self.assert_denied("jj split a.txt"))
+        for command in (
+            "jj split -i -m 'part one' a.txt",
+            "jj split --tool meld -m 'part one' a.txt",
+            "jj split -m 'part one' --editor a.txt",
+        ):
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
+    def test_diff_formatting_tools_are_not_treated_as_editors(self) -> None:
+        # --tool names a diff formatter on read-only commands, not an editor.
+        for command in (
+            "jj diff --tool difft",
+            "jj log --tool difft",
+            "jj show --tool difft",
+        ):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_help_is_not_denied(self) -> None:
+        for command in ("jj split --help", "jj describe -h"):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_override_comment_permits_the_command(self) -> None:
+        self.assert_allowed("jj describe  # intentionally interactive")
+        self.assert_allowed("jj split # intentionally interactive: rebasing by hand")
+
+    def test_reason_names_the_alternative_and_the_override(self) -> None:
+        reason = self.assert_denied("jj squash")
+        self.assertIn("jj squash -m", reason)
+        self.assertIn("# intentionally interactive", reason)
+
+    def test_global_options_precede_the_subcommand(self) -> None:
+        self.assert_denied("jj -R /tmp/repo --ignore-working-copy describe")
+        self.assert_allowed("jj -R /tmp/repo --config ui.color=never describe -m 'x'")
+
+    def test_later_commands_in_a_compound_are_checked(self) -> None:
+        self.assert_denied("jj status && jj commit")
+
+    def test_attached_short_value_is_not_read_as_another_flag(self) -> None:
+        # -fmain is --from=main; the letters of its value are not options, so
+        # neither the 'm' of -m nor the 'i' of -i may be read out of it.
+        self.assert_denied("jj squash -fmain")
+        self.assert_allowed("jj squash -fmain -m 'fix: thing'")
+        self.assert_allowed("jj squash -m'fix: thing'")
+
+    def test_clustered_short_flags_are_read_as_options(self) -> None:
+        self.assert_denied("jj squash -im 'fix: thing'")
+        self.assert_allowed("jj split -pm 'part one' a.txt")
+
+    def test_squash_allows_a_blank_description_on_either_side(self) -> None:
+        with unittest.mock.patch(
+            "bash_policy.development._jj_rev_has_blank_description"
+        ) as blank:
+            blank.side_effect = lambda rev, cwd: rev == "abc"
+            self.assert_allowed("jj squash --from abc --into def", "/tmp/repo")
+            self.assert_denied("jj squash -f xyz -t def", "/tmp/repo")
+
+    def test_guard_survives_an_unparseable_command(self) -> None:
+        with unittest.mock.patch.dict(
+            os.environ, {"BASH_POLICY_PARSER": "/nonexistent/parser"}
+        ):
+            self.assert_denied("jj status && jj commit")
+            self.assert_allowed("jj commit -m 'feat: thing'")
 
 
 class PolicyEngineTest(unittest.TestCase):

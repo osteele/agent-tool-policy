@@ -363,27 +363,122 @@ def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None
     return "", None
 
 
-def check_jj_split(command: str) -> tuple[str, str | None]:
+JJ_GLOBAL_OPTIONS_WITH_VALUES = {
+    "-R",
+    "--repository",
+    "--at-operation",
+    "--at-op",
+    "--color",
+    "--config",
+    "--config-file",
+    "--config-toml",
+}
+
+JJ_SPLIT_OPTIONS_WITH_VALUES = {
+    "-m",
+    "--message",
+    "-r",
+    "--revision",
+    "-o",
+    "--onto",
+    "-d",
+    "--destination",
+    "-A",
+    "--insert-after",
+    "--after",
+    "-B",
+    "--insert-before",
+    "--before",
+    "--tool",
+}
+
+# Short options that consume a value across the jj subcommands inspected here.
+# A clustered token stops at the first of these: -fmain is --from=main, not -m.
+JJ_SHORT_OPTIONS_WITH_VALUES = {
+    "-A",
+    "-B",
+    "-R",
+    "-c",
+    "-d",
+    "-f",
+    "-m",
+    "-o",
+    "-r",
+    "-t",
+}
+
+SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+
+
+def _short_flags(token: str) -> tuple[set[str], bool]:
     """
-    Deny `jj split` — it is interactive and cannot be used from Claude Code.
-    Use the /jj-split skill instead.
-
-    Returns:
-        ("deny", reason) if jj split is used
-        ("", None) otherwise
+    Return the short options a clustered token sets, and whether its value is a
+    separate token. Follows clap: the first letter that takes a value consumes
+    the rest of the token as that value.
     """
-    jj_words = find_command(command, "jj")
-    if not jj_words:
-        return "", None
+    if not token.startswith("-") or token.startswith("--") or len(token) < 2:
+        return set(), False
+    flags: set[str] = set()
+    for index, letter in enumerate(token[1:], start=1):
+        if not letter.isalpha():
+            return flags, False
+        flag = f"-{letter}"
+        flags.add(flag)
+        if flag in JJ_SHORT_OPTIONS_WITH_VALUES:
+            return flags, index == len(token) - 1
+    return flags, False
 
-    args = jj_words[1:]
-    if not args or args[0] != "split":
-        return "", None
 
-    return "deny", (
-        "`jj split` is interactive and cannot be used from Claude Code. "
-        "Use the `/jj-split` skill instead."
-    )
+def _jj_subcommand_index(words: list[str]) -> int | None:
+    """Return the index of jj's subcommand after its global options."""
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word in JJ_GLOBAL_OPTIONS_WITH_VALUES:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _has_flag(args: list[str], short: str | None, long: str) -> bool:
+    """Check whether a jj option appears among a subcommand's arguments."""
+    for arg in args:
+        if arg == long or (short is not None and arg == short):
+            return True
+        if arg.startswith(f"{long}="):
+            return True
+        if short is not None and short in _short_flags(arg)[0]:
+            return True
+    return False
+
+
+def _jj_positional_args(args: list[str], options_with_values: set[str]) -> list[str]:
+    """Return a subcommand's positional arguments, skipping options and values."""
+    positionals: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            positionals.extend(args[index + 1 :])
+            break
+        if not arg.startswith("-") or arg == "-":
+            positionals.append(arg)
+            index += 1
+            continue
+        if arg.startswith("--"):
+            index += 2 if arg in options_with_values else 1
+            continue
+        index += 2 if _short_flags(arg)[1] else 1
+    return positionals
+
+
+def _jj_diff_editor_requested(args: list[str]) -> bool:
+    """Check for options that start a diff editor whatever the description says."""
+    return _has_flag(args, "-i", "--interactive") or _has_flag(args, None, "--tool")
 
 
 def _jj_rev_has_blank_description(rev: str, cwd: str | None) -> bool:
@@ -402,62 +497,202 @@ def _jj_rev_has_blank_description(rev: str, cwd: str | None) -> bool:
         return False
 
 
-def check_jj_squash(command: str, cwd: str | None) -> tuple[str, str | None]:
-    """
-    Deny `jj squash` unless:
-    - -m/--message is provided, or
-    - -u/--use-destination-message is provided, or
-    - either source or destination revision has a blank description.
+def _jj_squash_revisions(args: list[str]) -> tuple[str, str]:
+    """Return the source and destination revisions a squash would combine."""
+    source = "@"
+    destination = "@-"
+    for index, arg in enumerate(args):
+        name, _, attached = arg.partition("=")
+        value = (
+            attached if attached else (args[index + 1] if index + 1 < len(args) else "")
+        )
+        if not value:
+            continue
+        if name in ("-r", "--revision", "-f", "--from"):
+            source = value
+        elif name in ("-t", "--into"):
+            destination = value
+    return source, destination
 
-    Without these, jj opens an interactive editor.
+
+def _jj_squash_reason(args: list[str], cwd: str | None) -> str | None:
+    if _jj_diff_editor_requested(args):
+        return "`jj squash -i`/`--tool` selects changes in a diff editor"
+    if _has_flag(args, "-m", "--message") or _has_flag(
+        args, "-u", "--use-destination-message"
+    ):
+        return None
+
+    source, destination = _jj_squash_revisions(args)
+    if cwd and (
+        _jj_rev_has_blank_description(source, cwd)
+        or _jj_rev_has_blank_description(destination, cwd)
+    ):
+        return None
+
+    return (
+        "`jj squash` without -m/--message opens an editor on the combined "
+        "description. Use `jj squash -m '...'`, or `jj squash -u` to keep the "
+        "destination's message"
+    )
+
+
+def _jj_split_reason(args: list[str]) -> str | None:
+    if _jj_diff_editor_requested(args):
+        return "`jj split -i`/`--tool` selects changes in a diff editor"
+    if not _jj_positional_args(
+        args, JJ_SPLIT_OPTIONS_WITH_VALUES | JJ_GLOBAL_OPTIONS_WITH_VALUES
+    ):
+        return (
+            "`jj split` without filesets selects changes in a diff editor. Split "
+            "explicit paths with `jj split -m '...' <paths>`, or use the "
+            "`/jj-split` skill"
+        )
+    if not _has_flag(args, "-m", "--message"):
+        return (
+            "`jj split` without -m/--message opens an editor for each new "
+            "description. Use `jj split -m '...' <paths>`"
+        )
+    return None
+
+
+def _jj_resolve_reason(args: list[str]) -> str | None:
+    if _has_flag(args, "-l", "--list"):
+        return None
+    for index, arg in enumerate(args):
+        if arg == "--tool" and index + 1 < len(args):
+            tool = args[index + 1]
+        elif arg.startswith("--tool="):
+            tool = arg.split("=", 1)[1]
+        else:
+            continue
+        if tool in (":ours", ":theirs"):
+            return None
+    return (
+        "`jj resolve` opens a merge tool. Use `jj resolve --list` to see the "
+        "conflicts, edit the conflict markers directly, or pick a side with "
+        "`jj resolve --tool :ours`/`:theirs`"
+    )
+
+
+def _jj_editor_reason(subcmd: str, args: list[str], cwd: str | None) -> str | None:
+    """Return why a jj invocation would wait on an editor, or None if it would not."""
+    if _has_flag(args, "-h", "--help"):
+        return None
+
+    if _has_flag(args, None, "--editor"):
+        return f"`jj {subcmd} --editor` forces an editor open"
+
+    if subcmd in ("describe", "desc"):
+        if _has_flag(args, "-m", "--message") or _has_flag(args, None, "--stdin"):
+            return None
+        return (
+            "`jj describe` without -m/--message opens an editor. "
+            "Use `jj describe -m '...'`"
+        )
+
+    if subcmd in ("commit", "ci"):
+        if _jj_diff_editor_requested(args):
+            return "`jj commit -i`/`--tool` selects changes in a diff editor"
+        if _has_flag(args, "-m", "--message"):
+            return None
+        return (
+            "`jj commit` without -m/--message opens an editor. Use `jj commit -m '...'`"
+        )
+
+    if subcmd == "squash":
+        return _jj_squash_reason(args, cwd)
+
+    if subcmd == "split":
+        return _jj_split_reason(args)
+
+    if subcmd == "diffedit":
+        return (
+            "`jj diffedit` opens a diff editor. Use `jj squash`/`jj restore` with "
+            "explicit paths"
+        )
+
+    if subcmd == "arrange":
+        return (
+            "`jj arrange` opens an interactive TUI. Use `jj rebase` or `jj parallelize`"
+        )
+
+    if subcmd == "resolve":
+        return _jj_resolve_reason(args)
+
+    if subcmd == "restore":
+        if _jj_diff_editor_requested(args):
+            return "`jj restore -i`/`--tool` selects changes in a diff editor"
+        return None
+
+    if subcmd == "config" and args[:1] in (["edit"], ["e"]):
+        return "`jj config edit` opens an editor. Use `jj config set`/`jj config unset`"
+
+    if subcmd == "sparse" and args[:1] == ["edit"]:
+        return "`jj sparse edit` opens an editor. Use `jj sparse set`"
+
+    if _has_flag(args, "-i", "--interactive"):
+        return f"`jj {subcmd} -i`/`--interactive` opens an interactive editor"
+
+    return None
+
+
+def _jj_invocations(commands: list[list[str]]) -> list[tuple[str, list[str]]]:
+    """Return the subcommand and arguments of each jj command."""
+    invocations: list[tuple[str, list[str]]] = []
+    for words in commands:
+        if not words or os.path.basename(words[0]) != "jj":
+            continue
+        index = _jj_subcommand_index(words)
+        if index is not None:
+            invocations.append((words[index], words[index + 1 :]))
+    return invocations
+
+
+def _split_on_shell_operators(command: str) -> list[list[str]]:
+    """Approximate the simple commands in a string the parser could not parse."""
+    commands: list[list[str]] = [[]]
+    for token in command.split():
+        if token in SHELL_OPERATORS:
+            commands.append([])
+            continue
+        commands[-1].append(token)
+    return [words for words in commands if words]
+
+
+def check_jj_interactive_commands(
+    command: str, cwd: str | None
+) -> tuple[str, str | None]:
+    """
+    Deny jj commands that would wait on an editor or an interactive UI, since an
+    agent session has nobody at the keyboard to close it.
+
+    An `# intentionally interactive` comment in the command overrides the guard,
+    matching the `# intentionally ignoring jj` escape for Git in a jj repository.
+
+    Uses both structured parsing and a token fallback, so the guard still works
+    when the parser cannot parse the command.
 
     Returns:
-        ("deny", reason) if jj squash would open an editor
+        ("deny", reason) if a jj command would open an editor
         ("", None) otherwise
     """
-    jj_words = find_command(command, "jj")
-    if not jj_words:
+    if re.search(r"#.*intentionally interactive", command):
         return "", None
 
-    args = jj_words[1:]
-    if not args or args[0] != "squash":
-        return "", None
+    parsed_cmds = extract_commands(command)
+    commands = parsed_cmds if parsed_cmds else _split_on_shell_operators(command)
 
-    source_rev = "@"
-    dest_rev = "@-"
+    for subcmd, args in _jj_invocations(commands):
+        reason = _jj_editor_reason(subcmd, args, cwd)
+        if reason:
+            return "deny", (
+                f"{reason}. An editor needs a person at the keyboard, which this "
+                f"session does not have. To run it anyway, end the command with "
+                f"the comment `# intentionally interactive`."
+            )
 
-    i = 1
-    while i < len(args):
-        arg = args[i]
-        if arg in ("--message", "-m") or arg.startswith(("--message=", "-m")):
-            return "", None
-        if arg in ("--use-destination-message", "-u"):
-            return "", None
-        if arg in ("--from", "-r") and i + 1 < len(args):
-            source_rev = args[i + 1]
-            i += 2
-            continue
-        if arg == "--into" and i + 1 < len(args):
-            dest_rev = args[i + 1]
-            i += 2
-            continue
-        if arg.startswith("--from="):
-            source_rev = arg.split("=", 1)[1]
-        elif arg.startswith("--into="):
-            dest_rev = arg.split("=", 1)[1]
-        i += 1
-
-    # Allow if either revision has a blank description (no editor conflict)
-    if cwd and (
-        _jj_rev_has_blank_description(source_rev, cwd)
-        or _jj_rev_has_blank_description(dest_rev, cwd)
-    ):
-        return "", None
-
-    return "deny", (
-        "`jj squash` without -m/--message opens an interactive editor, which cannot be used from Claude Code. "
-        "Use `jj squash -m '...'` to provide the message, or `jj squash -u` to use the destination message."
-    )
+    return "", None
 
 
 def check_pdflatex_with_justfile(
@@ -556,15 +791,10 @@ POLICIES = (
         ),
     ),
     FunctionPolicy(
-        "development.jj-split",
+        "development.jj-interactive",
         890,
-        lambda request: decision_from_check(check_jj_split(request.command)),
-    ),
-    FunctionPolicy(
-        "development.jj-squash",
-        880,
         lambda request: decision_from_check(
-            check_jj_squash(request.command, _cwd(request))
+            check_jj_interactive_commands(request.command, _cwd(request))
         ),
     ),
     FunctionPolicy(
