@@ -67,7 +67,7 @@ decision, while the Codex adapter converts asks to denials because Codex
 
 In a jj repository, Git mutations are denied by default. Read-oriented Git
 commands produce a warning when they do not resolve to the Git shadow in
-[agent-command-guards](../agent-command-guards), because an unguarded Git view can
+[agent-command-guards](https://github.com/osteele/agent-command-guards), because an unguarded Git view can
 lag jj's operation and revision state.
 
 jj commands that would block on an editor or an interactive UI are denied:
@@ -91,7 +91,7 @@ jj describe          # intentionally interactive
 ### Memory guard
 
 Local `uv run` requests are rewritten to run under `ram-guard` in
-[agent-command-guards](../agent-command-guards). Immediately before launch the
+[agent-command-guards](https://github.com/osteele/agent-command-guards). Immediately before launch the
 guard grants the command 70% of the memory macOS reports as available, leaving a
 30% reserve. It monitors aggregate process-tree RSS where process inspection is
 permitted, and falls back to the corresponding available-memory floor where it is
@@ -109,11 +109,11 @@ is never wrapped twice.
 
 ### Research review
 
-Research audit attestations are owned by [agent-review](../agent-review). This
-hook detects relevant commands, runs deterministic lint, and presents
-host-specific guidance; it delegates content keys and memo state to the fast local
-`agent-review` command. Review Workbench remains the separate viewer and future
-control surface for review rounds.
+Research audit attestations are owned by `agent-review`, a separate local tool
+that is not published. This hook detects relevant commands, runs deterministic
+lint, and presents host-specific guidance; it delegates content keys and memo
+state to that command, and does nothing when it is absent. Review Workbench is
+the separate viewer for review rounds.
 
 ## Output protocol
 
