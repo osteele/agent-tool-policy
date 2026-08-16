@@ -357,6 +357,32 @@ class CodexOutputAdapterTest(unittest.TestCase):
         self.assertEqual(hook_output["permissionDecision"], "deny")
         self.assertIn("Are you sure", hook_output["permissionDecisionReason"])
 
+    def test_uv_run_is_rewritten_with_full_tool_input(self):
+        output = invoke_hook(
+            self.tmp,
+            "uv run python experiment.py",
+            payload_overrides={
+                **self.codex_payload,
+                "tool_input": {
+                    "command": "uv run python experiment.py",
+                    "timeout": 30,
+                },
+            },
+        )
+        hook_output = output["hookSpecificOutput"]
+        self.assertEqual(hook_output["permissionDecision"], "allow")
+        updated = hook_output["updatedInput"]
+        self.assertEqual(updated["timeout"], 30)
+        self.assertIn("ram-guard", updated["command"])
+
+    def test_uv_run_bypass_is_not_rewritten(self):
+        output = invoke_hook(
+            self.tmp,
+            "LLM_RAM_GUARD=off uv run python experiment.py",
+            payload_overrides=self.codex_payload,
+        )
+        self.assertNotIn("updatedInput", output.get("hookSpecificOutput", {}))
+
 
 class ClaudeOutputAdapterTest(unittest.TestCase):
     """Claude PreToolUse preserves its native ask decision."""
@@ -366,6 +392,13 @@ class ClaudeOutputAdapterTest(unittest.TestCase):
             decision, reason = decide(tmp, "pip install requests")
         self.assertEqual(decision, "ask")
         self.assertIn("Are you sure", reason)
+
+    def test_uv_run_is_rewritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = invoke_hook(tmp, "uv run python experiment.py")
+        hook_output = output["hookSpecificOutput"]
+        self.assertEqual(hook_output["permissionDecision"], "allow")
+        self.assertIn("ram-guard", hook_output["updatedInput"]["command"])
 
 
 class BashSyntaxTest(unittest.TestCase):

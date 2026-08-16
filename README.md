@@ -20,6 +20,7 @@ and saved attestations to enforce rules such as:
 - validate `remote-jobs` and Weft invocations against local workflow rules
 - coordinate transfers with Mutagen and protected destination conventions
 - require first-run review of new or modified research scripts
+- guard local `uv run` process trees against workstation-wide memory exhaustion
 
 Most commands receive no decision and continue to the native permission system.
 A small set of exact, deterministic rules approves familiar read-oriented
@@ -95,6 +96,17 @@ The hook adapts its output protocol to the caller. Claude receives native
 `permissionDecision` values. For Codex PreToolUse, bare allows emit no output,
 advisory allows become `additionalContext`, asks fail closed as denials, and
 rewrites use `allow` together with `updatedInput`.
+
+Local `uv run` requests are rewritten through
+`agent-command-guards/ram-guard`. Immediately before launch, the guard assigns
+the command 70% of the memory macOS currently reports as available, leaving a
+30% reserve. It monitors aggregate process-tree RSS where process inspection is
+permitted and always enforces the corresponding available-memory floor. It also
+configures PyTorch MPS allocator watermarks at 0.7 hard / 0.6 soft. Configure
+the policy with `LLM_RAM_GUARD_AVAILABLE_FRACTION`, replace the dynamic budget
+with `LLM_RAM_GUARD_LIMIT`, and customize `LLM_MPS_HIGH_WATERMARK_RATIO` and
+`LLM_MPS_LOW_WATERMARK_RATIO`. Set `LLM_RAM_GUARD=off` on an individual command
+to bypass the rewrite explicitly.
 
 Install the hook symlink and build the parser helper (requires Go 1.25 or later):
 

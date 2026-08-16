@@ -7,6 +7,7 @@ import sys
 from .adapters import CLAUDE_ADAPTER, CODEX_ADAPTER
 from .engine import evaluate_policies
 from .registry import POLICIES
+from .rewrites import rewrite_for_ram_guard
 from .shell import build_request
 
 
@@ -37,7 +38,11 @@ def main():
 
     request = build_request(command, cwd)
     resolution = evaluate_policies(request, POLICIES)
-    output = adapter.render(resolution)
+    rewritten_command = rewrite_for_ram_guard(request)
+    updated_input = (
+        {**tool_input, "command": rewritten_command} if rewritten_command else None
+    )
+    output = adapter.render(resolution, updated_input=updated_input)
     if output is not None:
         print(json.dumps(output))
 

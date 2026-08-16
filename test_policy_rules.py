@@ -21,6 +21,7 @@ from bash_policy.remote_jobs import (
     check_remote_jobs_unquoted_tilde,
     check_remote_jobs_wait_flag,
 )
+from bash_policy.rewrites import RAM_GUARD, needs_ram_guard, rewrite_for_ram_guard
 from bash_policy.shell import (
     build_request,
     extract_commands,
@@ -362,6 +363,62 @@ class PolicyEngineTest(unittest.TestCase):
     def test_registry_has_unique_policy_names(self) -> None:
         names = [policy.name for policy in POLICIES]
         self.assertEqual(len(names), len(set(names)))
+
+
+class RamGuardRewriteTest(unittest.TestCase):
+    def test_rewrites_uv_run(self) -> None:
+        request = build_request("uv run python experiment.py", "/tmp/project")
+        rewritten = rewrite_for_ram_guard(request)
+        self.assertIsNotNone(rewritten)
+        self.assertIn("ram-guard", rewritten or "")
+        self.assertIn("/bin/zsh -c", rewritten or "")
+        self.assertIn("uv run python experiment.py", rewritten or "")
+
+    def test_uses_guard_name_when_guard_is_on_path(self) -> None:
+        request = build_request("uv run python experiment.py", "/tmp/project")
+        with unittest.mock.patch(
+            "bash_policy.rewrites.shutil.which", return_value=str(RAM_GUARD)
+        ):
+            rewritten = rewrite_for_ram_guard(request)
+        self.assertEqual(
+            rewritten,
+            "ram-guard -- /bin/zsh -c 'uv run python experiment.py'",
+        )
+
+    def test_uses_absolute_guard_when_different_guard_is_on_path(self) -> None:
+        request = build_request("uv run python experiment.py", "/tmp/project")
+        with unittest.mock.patch(
+            "bash_policy.rewrites.shutil.which",
+            return_value="/usr/local/bin/ram-guard",
+        ):
+            rewritten = rewrite_for_ram_guard(request)
+        self.assertTrue(rewritten.startswith(f"{RAM_GUARD} -- "))
+
+    def test_rewrites_prefixed_and_compound_uv_run(self) -> None:
+        for command in (
+            "mise exec -- uv run python experiment.py",
+            "uv sync && uv run python experiment.py",
+            "/Users/test/.local/bin/uv run python experiment.py",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(needs_ram_guard(build_request(command, None)))
+
+    def test_does_not_rewrite_other_uv_subcommands(self) -> None:
+        for command in ("uv sync", "uv tool run ruff", "echo uv run", "uv run --help"):
+            with self.subTest(command=command):
+                expected = command == "uv run --help"
+                self.assertEqual(
+                    needs_ram_guard(build_request(command, None)), expected
+                )
+
+    def test_explicit_bypass_and_existing_guard_are_preserved(self) -> None:
+        for command in (
+            "LLM_RAM_GUARD=off uv run python experiment.py",
+            "ram-guard -- uv run python experiment.py",
+            "LLM_RAM_GUARD_ACTIVE=1 uv run python experiment.py",
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(needs_ram_guard(build_request(command, None)))
 
 
 class HookProtocolAdapterTest(unittest.TestCase):
