@@ -138,10 +138,14 @@ def _resolve_executable(executable: str, cwd: str) -> Path | None:
 
 def _git_shadow_is_in_scope(executable: str, cwd: str) -> bool:
     """Check whether this Git invocation resolves to the guarded Git command."""
+    # Both variables name the directory that goes on PATH. Sessions that
+    # predate the shadows/ move still point at the repository root, where a
+    # transitional symlink resolves to the same file.
     guard_dir = os.environ.get(
         "AGENT_COMMAND_GUARDS_DIR",
         os.environ.get(
-            "LLM_SHADOW_COMMANDS_DIR", "~/code/agent-tools/agent-command-guards"
+            "LLM_SHADOW_COMMANDS_DIR",
+            "~/code/agent-tools/agent-command-guards/shadows",
         ),
     )
     shadow_git = Path(os.path.expanduser(guard_dir), "git")

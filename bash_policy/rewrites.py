@@ -11,7 +11,10 @@ from pathlib import Path
 from .models import Request
 
 RAM_GUARD = (
-    Path(__file__).resolve().parent.parent.parent / "agent-command-guards" / "ram-guard"
+    Path(__file__).resolve().parent.parent.parent
+    / "agent-command-guards"
+    / "shadows"
+    / "ram-guard"
 )
 BYPASS_PATTERN = re.compile(
     r"(?:^|\s)LLM_RAM_GUARD\s*=\s*(?:0|false|no|off)(?:\s|$)", re.IGNORECASE
