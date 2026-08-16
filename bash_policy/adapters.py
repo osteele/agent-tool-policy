@@ -1,4 +1,10 @@
-"""Protocol adapters for Claude and Codex PreToolUse hooks."""
+"""Protocol adapters for the PreToolUse hooks of each supported agent.
+
+The hosts differ in two ways that matter here: whether they can ask the user, and
+whether they can run a command the hook rewrote. Claude does both. Codex and
+opencode can rewrite but not ask. Kimi can do neither, verified against Kimi Code
+CLI 0.36.1: a returned `updatedInput` is ignored and the original command runs.
+"""
 
 from typing import Protocol
 
@@ -83,5 +89,44 @@ class CodexAdapter:
         return {"hookSpecificOutput": hook_output}
 
 
+class KimiAdapter:
+    """Render Kimi decisions, which carry neither an ask state nor a rewrite.
+
+    Kimi ignores `updatedInput`, so a rewrite cannot be delivered through the
+    hook at all. Dropping it silently is deliberate: the memory guard still
+    applies through the `uv` shadow on PATH, and denying every `uv run` to force
+    the rewrite would block the ordinary case that the shadow already covers.
+    """
+
+    def render(
+        self,
+        resolution: Resolution,
+        *,
+        updated_input: dict[str, object] | None = None,
+    ) -> HookOutput | None:
+        message = _message(resolution)
+        if resolution.disposition in {"deny", "ask"}:
+            hook_output: HookOutput = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+            }
+            if message:
+                hook_output["permissionDecisionReason"] = message
+            return {"hookSpecificOutput": hook_output}
+        return None
+
+
 CLAUDE_ADAPTER = ClaudeAdapter()
 CODEX_ADAPTER = CodexAdapter()
+KIMI_ADAPTER = KimiAdapter()
+
+# opencode's plugin shim reads the same fields Codex does and has the same
+# capabilities: it can block by throwing and rewrite by assigning args.
+OPENCODE_ADAPTER = CODEX_ADAPTER
+
+ADAPTERS = {
+    "claude": CLAUDE_ADAPTER,
+    "codex": CODEX_ADAPTER,
+    "kimi": KIMI_ADAPTER,
+    "opencode": OPENCODE_ADAPTER,
+}

@@ -15,11 +15,11 @@ PYTHON_BIN=$SCRIPT_DIR/.venv/bin/python
 UV_BIN=${UV_BIN:-${HOME:?}/.local/bin/uv}
 
 if [ -x "$PYTHON_BIN" ]; then
-    exec "$PYTHON_BIN" "$SCRIPT_DIR/bash-policy.py"
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/bash-policy.py" "$@"
 fi
 
 if [ ! -x "$UV_BIN" ]; then
     UV_BIN=$(command -v uv)
 fi
 
-exec "$UV_BIN" run --script "$SCRIPT_DIR/bash-policy.py"
+exec "$UV_BIN" run --script "$SCRIPT_DIR/bash-policy.py" "$@"

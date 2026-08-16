@@ -19,3 +19,27 @@ ln -sfn "$SOURCE" "$TARGET"
 echo "Symlinked $TARGET -> $SOURCE"
 ln -sfn "$LAUNCHER_SOURCE" "$LAUNCHER_TARGET"
 echo "Symlinked $LAUNCHER_TARGET -> $LAUNCHER_SOURCE"
+
+# opencode has no subprocess hook; it loads a plugin that calls this one.
+OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugin"
+if [ -d "$HOME/.config/opencode" ]; then
+    mkdir -p "$OPENCODE_PLUGIN_DIR"
+    ln -sfn "$REPO_DIR/integrations/opencode/agent-tool-policy.ts" \
+        "$OPENCODE_PLUGIN_DIR/agent-tool-policy.ts"
+    echo "Symlinked $OPENCODE_PLUGIN_DIR/agent-tool-policy.ts"
+fi
+
+# Kimi reads hooks from its own config, which this script will not edit in place.
+KIMI_CONFIG="$HOME/.kimi-code/config.toml"
+if [ -f "$KIMI_CONFIG" ] && ! grep -q "bash-policy-hook" "$KIMI_CONFIG"; then
+    cat <<'HINT'
+
+Kimi is installed but not wired up. Append to ~/.kimi-code/config.toml:
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "Bash"
+command = "~/.claude/hooks/bash-policy-hook"
+timeout = 5
+HINT
+fi

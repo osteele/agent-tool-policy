@@ -4,11 +4,37 @@ import json
 import select
 import sys
 
-from .adapters import CLAUDE_ADAPTER, CODEX_ADAPTER
+from .adapters import ADAPTERS, HookAdapter
 from .engine import evaluate_policies
 from .registry import POLICIES
 from .rewrites import rewrite_for_ram_guard
 from .shell import build_request
+
+
+def select_host(payload: dict, argv: list[str]) -> str:
+    """Name the agent this request came from.
+
+    opencode arrives through a plugin shim that says so on the command line.
+    Kimi identifies itself in the payload. Codex is recognized by fields only it
+    sends. Anything else is Claude, which is the only host whose configuration
+    predates this dispatch.
+    """
+    if "--host" in argv:
+        host = argv[argv.index("--host") + 1]
+        if host not in ADAPTERS:
+            raise SystemExit(
+                f"unknown --host {host!r}; expected one of {sorted(ADAPTERS)}"
+            )
+        return host
+    if payload.get("client_type") == "kimi_code_cli":
+        return "kimi"
+    if "model" in payload or "turn_id" in payload:
+        return "codex"
+    return "claude"
+
+
+def select_adapter(payload: dict, argv: list[str]) -> HookAdapter:
+    return ADAPTERS[select_host(payload, argv)]
 
 
 def main():
@@ -27,11 +53,7 @@ def main():
     tool_input = input_data.get("tool_input", {})
     command = tool_input.get("command", "")
     cwd = input_data.get("cwd")
-    adapter = (
-        CODEX_ADAPTER
-        if "model" in input_data or "turn_id" in input_data
-        else CLAUDE_ADAPTER
-    )
+    adapter = select_adapter(input_data, sys.argv[1:])
 
     if tool_name != "Bash":
         sys.exit(0)

@@ -1,8 +1,9 @@
 # Agent Tool Policy
 
-A `PreToolUse` hook for Claude Code and Codex that decides Bash tool requests
-against local development and research conventions. It is independent of
-`claude-wrapper` and its Anthropic proxy.
+A `PreToolUse` hook for Claude Code, Codex, Kimi, and opencode that decides Bash
+tool requests against local development and research conventions. One policy
+engine serves all four, so a rule written once applies wherever you are working.
+It is independent of `claude-wrapper` and its Anthropic proxy.
 
 ## Positioning
 
@@ -115,17 +116,33 @@ lint, and presents host-specific guidance; it delegates content keys and memo
 state to that command, and does nothing when it is absent. Review Workbench is
 the separate viewer for review rounds.
 
-## Output protocol
+## Hosts
 
-The hook adapts its output to the caller. Claude receives native
-`permissionDecision` values. For Codex `PreToolUse`, bare allows emit no output,
-advisory allows become `additionalContext`, asks fail closed as denials, and
-rewrites use `allow` together with `updatedInput`.
+Four agents share the policy engine. They differ in two capabilities, and each
+gets an adapter that emits only what it can act on:
+
+| Host | Ask | Rewrite | Notes |
+| --- | --- | --- | --- |
+| Claude Code | yes | yes | native `permissionDecision`, including `ask` |
+| Codex | no | yes | asks fail closed as denials; advice becomes `additionalContext` |
+| opencode | no | yes | reached through a plugin shim; blocking throws, rewriting assigns `args` |
+| Kimi | no | no | `updatedInput` is ignored, so no rewrite is emitted |
+
+The host is identified from the request: opencode's shim passes `--host opencode`,
+Kimi sends `client_type: "kimi_code_cli"`, Codex sends fields only it sends, and
+anything else is Claude.
+
+Kimi's inability to run a rewritten command costs less than it appears. The
+memory guard still applies through the `uv` shadow that
+[agent-command-guards](https://github.com/osteele/agent-command-guards) puts on
+`PATH`, which covers every `uv run` resolved through `PATH`. Only an absolute
+`uv` path or a `mise`/`command` prefix escapes both, and denying those outright
+would block the ordinary case the shadow already handles.
 
 ## Installation
 
-Install the hook symlink and build the parser helper, which needs Go 1.25 or
-later:
+Build the parser helper, which needs Go 1.25 or later, and install the hook
+symlink plus the opencode plugin:
 
 ```bash
 ./setup
@@ -140,6 +157,21 @@ Configure Claude Code to run it for Bash `PreToolUse` events:
   "timeout": 5
 }
 ```
+
+Kimi reads its hooks from `~/.kimi-code/config.toml`:
+
+```toml
+[[hooks]]
+event = "PreToolUse"
+matcher = "Bash"
+command = "~/.claude/hooks/bash-policy-hook"
+timeout = 5
+```
+
+opencode has no subprocess hook, so `integrations/opencode/agent-tool-policy.ts`
+implements `tool.execute.before` and calls this hook itself. `./setup` symlinks it
+into `~/.config/opencode/plugin/`. A missing or slow hook leaves the command
+alone rather than failing the session.
 
 The launcher uses the project's virtual environment when available. Otherwise it
 resolves `uv` from `~/.local/bin` before falling back to `PATH`, so the hook also

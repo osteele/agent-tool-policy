@@ -6,7 +6,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from bash_policy.adapters import CLAUDE_ADAPTER, CODEX_ADAPTER
+from bash_policy.adapters import CLAUDE_ADAPTER, CODEX_ADAPTER, KIMI_ADAPTER
 from bash_policy.development import (
     check_all_commands_safe,
     check_jj_interactive_commands,
@@ -14,6 +14,7 @@ from bash_policy.development import (
     check_ruff_commands,
 )
 from bash_policy.engine import evaluate_policies
+from bash_policy.hook import select_host
 from bash_policy.models import Decision, FunctionPolicy, Request, Resolution
 from bash_policy.registry import POLICIES
 from bash_policy.remote_jobs import (
@@ -421,7 +422,44 @@ class RamGuardRewriteTest(unittest.TestCase):
                 self.assertFalse(needs_ram_guard(build_request(command, None)))
 
 
+class HostSelectionTest(unittest.TestCase):
+    def test_each_host_is_recognized(self) -> None:
+        for payload, expected in (
+            ({}, "claude"),
+            ({"client_type": "kimi_code_cli"}, "kimi"),
+            ({"model": "gpt-5"}, "codex"),
+            ({"turn_id": "t1"}, "codex"),
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(select_host(payload, []), expected)
+
+    def test_explicit_host_wins_over_sniffing(self) -> None:
+        payload = {"client_type": "kimi_code_cli"}
+        self.assertEqual(select_host(payload, ["--host", "opencode"]), "opencode")
+
+    def test_unknown_host_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            select_host({}, ["--host", "emacs"])
+
+
 class HookProtocolAdapterTest(unittest.TestCase):
+    def test_kimi_drops_a_rewrite_it_cannot_apply(self) -> None:
+        # Verified against Kimi Code CLI 0.36.1: updatedInput is ignored and the
+        # original command runs, so emitting one would only look like coverage.
+        self.assertIsNone(
+            KIMI_ADAPTER.render(Resolution(None), updated_input={"command": "guarded"})
+        )
+
+    def test_kimi_denies_rather_than_asking(self) -> None:
+        output = KIMI_ADAPTER.render(Resolution("ask", "confirm?"))
+        assert output is not None
+        decision = output["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertEqual(decision["permissionDecisionReason"], "confirm?")
+
+    def test_kimi_says_nothing_when_there_is_nothing_to_say(self) -> None:
+        self.assertIsNone(KIMI_ADAPTER.render(Resolution("allow")))
+
     def test_codex_rewrite_uses_allow_with_updated_input(self) -> None:
         output = CODEX_ADAPTER.render(
             Resolution("allow"),
