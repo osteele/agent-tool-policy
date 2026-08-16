@@ -31,7 +31,9 @@ PREFLIGHT_MEMO = Path(
 
 def _review_cli() -> Path | None:
     """Find the fast local protocol CLI installed by agent-review."""
-    configured = os.environ.get("AGENT_REVIEW_CLI") or os.environ.get("CROSS_AGENT_REVIEW_CLI")
+    configured = os.environ.get("AGENT_REVIEW_CLI") or os.environ.get(
+        "CROSS_AGENT_REVIEW_CLI"
+    )
     candidates = [
         Path(configured) if configured else None,
         Path.home() / "bin" / "agent-review",
@@ -109,7 +111,8 @@ def _record_opportunities(
     try:
         recorder_env = dict(os.environ)
         if not (
-            recorder_env.get("AGENT_REVIEW_STATE") or recorder_env.get("CROSS_AGENT_REVIEW_STATE")
+            recorder_env.get("AGENT_REVIEW_STATE")
+            or recorder_env.get("CROSS_AGENT_REVIEW_STATE")
         ):
             isolated_memo = recorder_env.get("WEFT_PREFLIGHT_MEMO")
             if isolated_memo:
