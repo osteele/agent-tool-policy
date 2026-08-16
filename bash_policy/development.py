@@ -137,11 +137,14 @@ def _resolve_executable(executable: str, cwd: str) -> Path | None:
 
 
 def _git_shadow_is_in_scope(executable: str, cwd: str) -> bool:
-    """Check whether this Git invocation resolves to llm-shadow-commands/git."""
-    shadow_dir = os.environ.get(
-        "LLM_SHADOW_COMMANDS_DIR", "~/code/agent-tools/llm-shadow-commands"
+    """Check whether this Git invocation resolves to the guarded Git command."""
+    guard_dir = os.environ.get(
+        "AGENT_COMMAND_GUARDS_DIR",
+        os.environ.get(
+            "LLM_SHADOW_COMMANDS_DIR", "~/code/agent-tools/agent-command-guards"
+        ),
     )
-    shadow_git = Path(os.path.expanduser(shadow_dir), "git")
+    shadow_git = Path(os.path.expanduser(guard_dir), "git")
     invoked_git = _resolve_executable(executable, cwd)
     if (
         invoked_git is None
@@ -289,7 +292,7 @@ def check_git_in_jj_repo(command: str, cwd: str | None) -> tuple[str, str | None
     Check if a git command is being used in a jj repository.
     Deny git commit/add/stash/apply and mutating git branch operations unless the
     command includes an intentional override comment. Warn on read-only Git commands
-    when that invocation does not resolve to the llm-shadow-commands Git wrapper.
+    when that invocation does not resolve to the agent-command-guards Git wrapper.
 
     The executable-path check catches explicit bypasses such as /usr/bin/git even
     when the shadow-command directory is otherwise on PATH.

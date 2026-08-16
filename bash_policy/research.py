@@ -30,12 +30,12 @@ PREFLIGHT_MEMO = Path(
 
 
 def _review_cli() -> Path | None:
-    """Find the fast local protocol CLI installed by cross-agent-review."""
-    configured = os.environ.get("CROSS_AGENT_REVIEW_CLI")
+    """Find the fast local protocol CLI installed by agent-review."""
+    configured = os.environ.get("AGENT_REVIEW_CLI") or os.environ.get("CROSS_AGENT_REVIEW_CLI")
     candidates = [
         Path(configured) if configured else None,
         Path.home() / "bin" / "agent-review",
-        Path.home() / "code" / "agent-tools" / "cross-agent-review" / "agent-review",
+        Path.home() / "code" / "agent-tools" / "agent-review" / "agent-review",
     ]
     return next(
         (path for path in candidates if path is not None and path.is_file()), None
@@ -108,10 +108,12 @@ def _record_opportunities(
         return False
     try:
         recorder_env = dict(os.environ)
-        if "CROSS_AGENT_REVIEW_STATE" not in recorder_env:
+        if not (
+            recorder_env.get("AGENT_REVIEW_STATE") or recorder_env.get("CROSS_AGENT_REVIEW_STATE")
+        ):
             isolated_memo = recorder_env.get("WEFT_PREFLIGHT_MEMO")
             if isolated_memo:
-                recorder_env["CROSS_AGENT_REVIEW_STATE"] = str(
+                recorder_env["AGENT_REVIEW_STATE"] = str(
                     Path(isolated_memo).parent / "review-state"
                 )
         result = subprocess.run(

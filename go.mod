@@ -1,4 +1,4 @@
-module github.com/osteele/claude-hooks
+module github.com/osteele/agent-tool-policy
 
 go 1.25.0
 

@@ -191,7 +191,9 @@ class GitInJjRepoTest(unittest.TestCase):
         decision, reason = decide(
             repo,
             "/usr/bin/git branch --show-current",
-            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+            env_overrides={
+                "AGENT_COMMAND_GUARDS_DIR": str(self.tmp / "missing-shadow")
+            },
         )
         self.assertEqual(decision, "allow")
         self.assertIn("jj bookmark list", reason)
@@ -216,7 +218,7 @@ class GitInJjRepoTest(unittest.TestCase):
         decision, reason = decide(
             repo,
             "git log -1",
-            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(missing_shadow)},
+            env_overrides={"AGENT_COMMAND_GUARDS_DIR": str(missing_shadow)},
         )
 
         self.assertEqual(decision, "allow")
@@ -239,7 +241,7 @@ class GitInJjRepoTest(unittest.TestCase):
                     repo,
                     f"git {subcmd}",
                     env_overrides={
-                        "LLM_SHADOW_COMMANDS_DIR": str(shadow_dir),
+                        "AGENT_COMMAND_GUARDS_DIR": str(shadow_dir),
                         "PATH": path,
                     },
                 )
@@ -259,7 +261,7 @@ class GitInJjRepoTest(unittest.TestCase):
             repo,
             "/usr/bin/git status",
             env_overrides={
-                "LLM_SHADOW_COMMANDS_DIR": str(shadow_dir),
+                "AGENT_COMMAND_GUARDS_DIR": str(shadow_dir),
                 "PATH": f"{shadow_dir}:{os.environ['PATH']}",
             },
         )
@@ -274,7 +276,9 @@ class GitInJjRepoTest(unittest.TestCase):
         decision, reason = decide(
             repo,
             "git log  # intentionally ignoring jj",
-            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+            env_overrides={
+                "AGENT_COMMAND_GUARDS_DIR": str(self.tmp / "missing-shadow")
+            },
         )
 
         self.assertEqual(decision, "allow")
@@ -293,7 +297,7 @@ class GitInJjRepoTest(unittest.TestCase):
                 decision, reason = decide(
                     repo,
                     command,
-                    env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(missing_shadow)},
+                    env_overrides={"AGENT_COMMAND_GUARDS_DIR": str(missing_shadow)},
                 )
                 self.assertEqual(decision, "allow")
                 self.assertIn(expected_jj, reason)
@@ -323,7 +327,9 @@ class CodexOutputAdapterTest(unittest.TestCase):
         output = invoke_hook(
             self.tmp,
             "git log -1",
-            env_overrides={"LLM_SHADOW_COMMANDS_DIR": str(self.tmp / "missing-shadow")},
+            env_overrides={
+                "AGENT_COMMAND_GUARDS_DIR": str(self.tmp / "missing-shadow")
+            },
             payload_overrides=self.codex_payload,
         )
         hook_output = output["hookSpecificOutput"]

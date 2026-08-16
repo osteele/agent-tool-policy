@@ -1,7 +1,7 @@
 [project]
-name = "claude-hooks"
+name = "agent-tool-policy"
 version = "0.1.0"
-description = "Personal Claude Code hooks"
+description = "Deterministic tool-request policy for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

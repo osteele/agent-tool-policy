@@ -46,7 +46,7 @@ class ReviewOpportunityTest(unittest.TestCase):
             self.project,
             self.command,
             self.memo,
-            env_overrides={"CROSS_AGENT_REVIEW_STATE": str(invalid_state)},
+            env_overrides={"AGENT_REVIEW_STATE": str(invalid_state)},
         )
         self.assertEqual(decision, "deny")
         self.assertIn("preflight-checked", reason)

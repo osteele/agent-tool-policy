@@ -1,4 +1,4 @@
-# Claude Hooks
+# Agent Tool Policy
 
 Personal Claude Code and Codex hooks that enforce local development and research
 workflows. They are independent of `claude-wrapper` and its Anthropic proxy.
@@ -65,14 +65,14 @@ PreToolUse does not currently support asking. Codex advice is emitted as
 `additionalContext`; bare Codex allows emit no output.
 
 Research audit attestations are owned by
-`~/code/agent-tools/cross-agent-review`. This hook detects relevant commands, runs
+`~/code/agent-tools/agent-review`. This hook detects relevant commands, runs
 deterministic lint, and presents host-specific guidance; it delegates content
 keys and memo state to the fast local `agent-review` command. Review Workbench
 remains the separate viewer and future control surface for review rounds.
 
 In jj repositories, Git mutations are denied by default. Read-oriented Git
 commands produce a warning when they do not resolve to
-`~/code/agent-tools/llm-shadow-commands/git`, because an unshadowed Git view can lag jj's
+`~/code/agent-tools/agent-command-guards/git`, because an unguarded Git view can lag jj's
 operation and revision state.
 
 jj commands that would block on an editor or an interactive UI are denied:
